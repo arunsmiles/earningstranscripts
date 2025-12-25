@@ -16,7 +16,10 @@ A Python toolkit for downloading:
 ### SEC EDGAR Filing Downloader
 - Download 10-K (annual) and 10-Q (quarterly) filings from SEC EDGAR
 - Uses official SEC API (free, no API key required)
-- Downloads both original HTML and markdown versions
+- Downloads multiple formats per filing:
+  - Primary HTML document
+  - Complete submission text file (contains all exhibits)
+  - XBRL financial data files
 - Automatic fiscal year and quarter calculation
 - Supports amendments (10-K/A, 10-Q/A)
 - Configurable date ranges (default: last 3 months)
@@ -93,12 +96,14 @@ python fool_transcript_downloader.py --page-scrape --max-pages 50
 
 ### SEC Filings
 - **Quarterly reports:** `secfilings\<TICKER>_<YEAR>_<QUARTER>_<FORM>.<ext>`
-  - Example: `secfilings\AAPL_2024_Q3_10-Q.html`
-  - Example: `secfilings\AAPL_2024_Q3_10-Q.md`
+  - HTML: `secfilings\AAPL_2024_Q3_10-Q.html`
+  - Complete submission: `secfilings\AAPL_2024_Q3_10-Q_complete.txt`
+  - XBRL files: `secfilings\AAPL_2024_Q3_10-Q_xbrl\*.xml`
 
 - **Annual reports:** `secfilings\<TICKER>_<YEAR>_FY_<FORM>.<ext>`
-  - Example: `secfilings\MSFT_2023_FY_10-K.html`
-  - Example: `secfilings\MSFT_2023_FY_10-K.md`
+  - HTML: `secfilings\MSFT_2023_FY_10-K.html`
+  - Complete submission: `secfilings\MSFT_2023_FY_10-K_complete.txt`
+  - XBRL files: `secfilings\MSFT_2023_FY_10-K_xbrl\*.xml`
 
 ### Fool Transcripts
 - `transcripts\<TICKER>_<YEAR>_<QUARTER>_earningstranscript_from_fool.md`
@@ -108,14 +113,20 @@ python fool_transcript_downloader.py --page-scrape --max-pages 50
 
 ```
 earningstranscripts/
-├── secfilings/              # SEC EDGAR filings
-│   ├── AAPL_2024_Q1_10-Q.html
-│   ├── AAPL_2024_Q1_10-Q.md
+├── secfilings/                      # SEC EDGAR filings
+│   ├── AAPL_2024_Q1_10-Q.html       # Primary HTML document
+│   ├── AAPL_2024_Q1_10-Q_complete.txt  # Complete submission (all exhibits)
+│   ├── AAPL_2024_Q1_10-Q_xbrl/      # XBRL financial data
+│   │   ├── aapl-20240330.xml
+│   │   ├── aapl-20240330.xsd
+│   │   └── ...
 │   ├── AAPL_2024_Q2_10-Q.html
-│   ├── AAPL_2024_Q2_10-Q.md
+│   ├── AAPL_2024_Q2_10-Q_complete.txt
+│   ├── AAPL_2024_Q2_10-Q_xbrl/
 │   ├── AAPL_2023_FY_10-K.html
-│   └── AAPL_2023_FY_10-K.md
-└── transcripts/             # Motley Fool transcripts
+│   ├── AAPL_2023_FY_10-K_complete.txt
+│   └── AAPL_2023_FY_10-K_xbrl/
+└── transcripts/                     # Motley Fool transcripts
     ├── AAPL_2024_Q1_earningstranscript_from_fool.md
     └── AAPL_2024_Q2_earningstranscript_from_fool.md
 ```
