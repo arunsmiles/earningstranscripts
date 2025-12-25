@@ -12,6 +12,13 @@ from pathlib import Path
 from typing import Optional
 import logging
 
+# Load .env file if it exists
+try:
+    from dotenv import load_dotenv
+    load_dotenv()  # Load from .env in current directory
+except ImportError:
+    pass  # dotenv not installed, continue without it
+
 logger = logging.getLogger(__name__)
 
 # Default data directory locations

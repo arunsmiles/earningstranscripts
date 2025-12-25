@@ -212,3 +212,6 @@ secfilings/
 .sec_cache/
 
 .DS_Store
+
+# Data directory (new structure)
+data/
