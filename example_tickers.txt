@@ -1,0 +1,17 @@
+# Example ticker file for SEC bulk downloader
+# One ticker per line
+# Lines starting with # are comments
+
+# Tech giants
+AAPL
+MSFT
+GOOGL
+META
+AMZN
+
+# Other major companies
+TSLA
+NVDA
+JPM
+V
+WMT
