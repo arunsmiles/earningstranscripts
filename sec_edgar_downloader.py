@@ -5,6 +5,11 @@ SEC EDGAR Filing Downloader
 Downloads 10-K (annual) and 10-Q (quarterly) filings from SEC EDGAR for specified companies.
 Uses the official SEC EDGAR API (data.sec.gov) which requires no API key.
 
+Downloads:
+- Primary HTML document
+- Complete submission text file (.txt)
+- XBRL financial data files
+
 Author: Claude
 License: MIT
 """
@@ -16,7 +21,7 @@ import os
 import re
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -56,6 +61,7 @@ class SECFilingInfo:
     primary_document: str  # Filename of the primary document
     year: int
     quarter: Optional[str] = None  # Q1, Q2, Q3, Q4 for 10-Q; None for 10-K
+    xbrl_files: List[str] = field(default_factory=list)  # List of XBRL-related files
 
 
 class SECEdgarDownloader:
@@ -247,6 +253,63 @@ class SECEdgarDownloader:
             calendar_quarter = (report_dt.month - 1) // 3 + 1
             return f"Q{calendar_quarter}"
 
+    def _get_filing_files_list(self, cik: str, accession_number: str) -> List[str]:
+        """
+        Get list of all files in a filing submission
+
+        Args:
+            cik: CIK number
+            accession_number: Accession number
+
+        Returns:
+            List of filenames in the submission
+        """
+        # Remove dashes from accession number
+        accession_no_dashes = accession_number.replace("-", "")
+
+        # Construct URL to filing directory index
+        index_url = f"{SEC_ARCHIVES_URL}/{cik}/{accession_no_dashes}/index.json"
+
+        try:
+            headers = self.headers.copy()
+            headers["Host"] = "www.sec.gov"
+            response = self._make_request(index_url, headers=headers)
+            index_data = response.json()
+
+            # Extract filenames from directory listing
+            files = []
+            if "directory" in index_data and "item" in index_data["directory"]:
+                for item in index_data["directory"]["item"]:
+                    if "name" in item:
+                        files.append(item["name"])
+
+            return files
+        except Exception as e:
+            logger.debug(f"Could not fetch file list for {accession_number}: {e}")
+            return []
+
+    def _identify_xbrl_files(self, files: List[str]) -> List[str]:
+        """
+        Identify XBRL-related files from a file list
+
+        Args:
+            files: List of filenames
+
+        Returns:
+            List of XBRL-related filenames
+        """
+        xbrl_files = []
+        xbrl_extensions = ['.xml', '.xsd', '.cal', '.def', '.lab', '.pre']
+
+        for filename in files:
+            # Check for XBRL file extensions
+            if any(filename.lower().endswith(ext) for ext in xbrl_extensions):
+                # Exclude non-XBRL XML files
+                if not any(exclude in filename.lower() for exclude in ['xml.old', 'cached']):
+                    xbrl_files.append(filename)
+
+        return xbrl_files
+
     def parse_filings_from_submissions(
         self,
         submissions_data: Dict,
@@ -288,6 +351,9 @@ class SECEdgarDownloader:
         forms = recent.get("form", [])
         primary_docs = recent.get("primaryDocument", [])
 
+        logger.debug(f"Processing {len(forms)} total filings for {ticker}")
+        logger.debug(f"Form types filter: {form_types}")
+
         # Iterate through filings
         for i in range(len(forms)):
             form = forms[i]
@@ -315,6 +381,11 @@ class SECEdgarDownloader:
             if form.startswith("10-Q"):
                 quarter = self._calculate_quarter(report_date_str, fiscal_year_end)
 
+            # Get list of files in this submission to identify XBRL files
+            cik_padded = cik.zfill(10)
+            files = self._get_filing_files_list(cik_padded, accession_numbers[i])
+            xbrl_files = self._identify_xbrl_files(files) if files else []
+
             filing_info = SECFilingInfo(
                 ticker=ticker,
                 cik=cik,
@@ -324,20 +395,28 @@ class SECEdgarDownloader:
                 accession_number=accession_numbers[i],
                 primary_document=primary_docs[i],
                 year=year,
-                quarter=quarter
+                quarter=quarter,
+                xbrl_files=xbrl_files
             )
 
             filings.append(filing_info)
 
         logger.info(f"Found {len(filings)} filings for {ticker} matching criteria")
+        if filings:
+            form_counts = {}
+            for f in filings:
+                form_counts[f.form_type] = form_counts.get(f.form_type, 0) + 1
+            logger.info(f"Breakdown by form type: {form_counts}")
+
         return filings
 
-    def _get_filing_url(self, filing_info: SECFilingInfo) -> str:
+    def _get_filing_url(self, filing_info: SECFilingInfo, filename: str = None) -> str:
         """
         Construct URL for filing document
 
         Args:
             filing_info: Filing information
+            filename: Optional specific filename (defaults to primary document)
 
         Returns:
             URL to download filing
@@ -345,64 +424,38 @@ class SECEdgarDownloader:
         # Remove dashes from accession number for URL
         accession_no_dashes = filing_info.accession_number.replace("-", "")
 
-        url = f"{SEC_ARCHIVES_URL}/{filing_info.cik}/{accession_no_dashes}/{filing_info.primary_document}"
+        if filename is None:
+            filename = filing_info.primary_document
+
+        # Pad CIK to 10 digits
+        cik_padded = filing_info.cik.zfill(10)
+
+        url = f"{SEC_ARCHIVES_URL}/{cik_padded}/{accession_no_dashes}/{filename}"
         return url
 
-    def _html_to_markdown(self, html_content: str, filing_info: SECFilingInfo) -> str:
+    def _get_complete_submission_url(self, filing_info: SECFilingInfo) -> str:
         """
-        Convert HTML filing to markdown format
+        Construct URL for complete submission text file
 
         Args:
-            html_content: HTML content
-            filing_info: Filing information for metadata
+            filing_info: Filing information
 
         Returns:
-            Markdown formatted content
+            URL to download complete submission
         """
-        soup = BeautifulSoup(html_content, 'html.parser')
+        # Complete submission uses the accession number with dashes as filename
+        cik_padded = filing_info.cik.zfill(10)
+        url = f"{SEC_ARCHIVES_URL}/{cik_padded}/{filing_info.accession_number.replace('-', '')}/{filing_info.accession_number}.txt"
+        return url
 
-        # Remove script and style elements
-        for script in soup(["script", "style"]):
-            script.decompose()
-
-        # Get text content
-        text = soup.get_text()
-
-        # Clean up whitespace
-        lines = (line.strip() for line in text.splitlines())
-        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-        text = '\n'.join(chunk for chunk in chunks if chunk)
-
-        # Add header with metadata
-        filing_url = self._get_filing_url(filing_info)
-        header = f"""# {filing_info.ticker} - {filing_info.form_type}
-
-**Company:** {filing_info.ticker}
-**Form Type:** {filing_info.form_type}
-**Filing Date:** {filing_info.filing_date}
-**Report Date:** {filing_info.report_date}
-**Year:** {filing_info.year}
-"""
-        if filing_info.quarter:
-            header += f"**Quarter:** {filing_info.quarter}\n"
-
-        header += f"""**Accession Number:** {filing_info.accession_number}
-
-**Source:** {filing_url}
-
----
-
-"""
-
-        return header + text
-
-    def _generate_filename(self, filing_info: SECFilingInfo, extension: str) -> str:
+    def _generate_filename(self, filing_info: SECFilingInfo, extension: str, suffix: str = "") -> str:
         """
         Generate filename following the naming convention
 
         Args:
             filing_info: Filing information
-            extension: File extension (.html or .md)
+            extension: File extension (.html, .txt, .xml, etc.)
+            suffix: Optional suffix to add before extension (e.g., "_complete", "_xbrl")
 
         Returns:
             Filename string
@@ -413,79 +466,126 @@ class SECEdgarDownloader:
 
         if filing_info.quarter:
             # Quarterly filing: TICKER_YEAR_QUARTER_FORMID.ext
-            filename = f"{ticker}_{year}_{filing_info.quarter}_{form_id}{extension}"
+            filename = f"{ticker}_{year}_{filing_info.quarter}_{form_id}{suffix}{extension}"
         else:
             # Annual filing: TICKER_YEAR_FY_FORMID.ext
-            filename = f"{ticker}_{year}_FY_{form_id}{extension}"
+            filename = f"{ticker}_{year}_FY_{form_id}{suffix}{extension}"
 
         return filename
 
-    def download_filing(self, filing_info: SECFilingInfo) -> Tuple[str, str]:
+    def download_filing(self, filing_info: SECFilingInfo) -> Dict[str, str]:
         """
-        Download a single filing
+        Download all files for a single filing
 
         Args:
             filing_info: Filing information
 
         Returns:
-            Tuple of (html_content, markdown_content)
+            Dictionary mapping file types to content
+            Keys: 'html', 'complete_txt', 'xbrl_files' (dict of filename: content)
         """
-        url = self._get_filing_url(filing_info)
         logger.info(f"Downloading {filing_info.ticker} {filing_info.form_type} from {filing_info.filing_date}")
-        logger.debug(f"URL: {url}")
 
+        downloaded = {}
+        headers = self.headers.copy()
+        headers["Host"] = "www.sec.gov"
+
+        # 1. Download primary HTML document
         try:
-            # Use different headers for SEC archives
-            headers = self.headers.copy()
-            headers["Host"] = "www.sec.gov"
-
-            response = self._make_request(url, headers=headers)
+            html_url = self._get_filing_url(filing_info)
+            logger.debug(f"Downloading HTML: {html_url}")
+            response = self._make_request(html_url, headers=headers)
             html_content = response.text
 
             # Validate content size
             content_size_kb = len(html_content) / 1024
             if content_size_kb < MIN_CONTENT_SIZE_KB:
-                logger.warning(f"Downloaded content is very small ({content_size_kb:.2f} KB), might be incomplete")
+                logger.warning(f"Downloaded HTML content is very small ({content_size_kb:.2f} KB), might be incomplete")
 
-            # Convert to markdown
-            markdown_content = self._html_to_markdown(html_content, filing_info)
-
-            return html_content, markdown_content
-
+            downloaded['html'] = html_content
+            logger.debug(f"Downloaded HTML ({content_size_kb:.2f} KB)")
         except Exception as e:
-            logger.error(f"Failed to download filing: {e}")
-            raise
+            logger.error(f"Failed to download HTML: {e}")
+            downloaded['html'] = None
 
-    def save_filing(self, html_content: str, markdown_content: str, filing_info: SECFilingInfo) -> Tuple[Path, Path]:
+        # 2. Download complete submission text file
+        try:
+            complete_url = self._get_complete_submission_url(filing_info)
+            logger.debug(f"Downloading complete submission: {complete_url}")
+            response = self._make_request(complete_url, headers=headers)
+            complete_txt = response.text
+
+            content_size_kb = len(complete_txt) / 1024
+            downloaded['complete_txt'] = complete_txt
+            logger.debug(f"Downloaded complete submission ({content_size_kb:.2f} KB)")
+        except Exception as e:
+            logger.warning(f"Failed to download complete submission: {e}")
+            downloaded['complete_txt'] = None
+
+        # 3. Download XBRL files
+        downloaded['xbrl_files'] = {}
+        if filing_info.xbrl_files:
+            logger.debug(f"Downloading {len(filing_info.xbrl_files)} XBRL files")
+            for xbrl_file in filing_info.xbrl_files:
+                try:
+                    xbrl_url = self._get_filing_url(filing_info, filename=xbrl_file)
+                    logger.debug(f"Downloading XBRL file: {xbrl_file}")
+                    response = self._make_request(xbrl_url, headers=headers)
+                    downloaded['xbrl_files'][xbrl_file] = response.text
+                except Exception as e:
+                    logger.warning(f"Failed to download XBRL file {xbrl_file}: {e}")
+
+        return downloaded
+
+    def save_filing(self, downloaded: Dict[str, str], filing_info: SECFilingInfo) -> List[Path]:
         """
-        Save filing to disk in both HTML and Markdown formats
+        Save filing files to disk
 
         Args:
-            html_content: HTML content
-            markdown_content: Markdown content
+            downloaded: Dictionary of downloaded content
             filing_info: Filing information
 
         Returns:
-            Tuple of (html_path, markdown_path)
+            List of saved file paths
         """
-        # Generate filenames
-        html_filename = self._generate_filename(filing_info, ".html")
-        md_filename = self._generate_filename(filing_info, ".md")
+        saved_paths = []
 
-        html_path = self.output_dir / html_filename
-        md_path = self.output_dir / md_filename
+        # 1. Save HTML
+        if downloaded.get('html'):
+            html_filename = self._generate_filename(filing_info, ".html")
+            html_path = self.output_dir / html_filename
+            with open(html_path, 'w', encoding='utf-8') as f:
+                f.write(downloaded['html'])
+            logger.info(f"Saved HTML: {html_path}")
+            saved_paths.append(html_path)
 
-        # Save HTML
-        with open(html_path, 'w', encoding='utf-8') as f:
-            f.write(html_content)
-        logger.info(f"Saved HTML: {html_path}")
+        # 2. Save complete submission text
+        if downloaded.get('complete_txt'):
+            txt_filename = self._generate_filename(filing_info, ".txt", suffix="_complete")
+            txt_path = self.output_dir / txt_filename
+            with open(txt_path, 'w', encoding='utf-8') as f:
+                f.write(downloaded['complete_txt'])
+            logger.info(f"Saved complete submission: {txt_path}")
+            saved_paths.append(txt_path)
 
-        # Save Markdown
-        with open(md_path, 'w', encoding='utf-8') as f:
-            f.write(markdown_content)
-        logger.info(f"Saved Markdown: {md_path}")
+        # 3. Save XBRL files
+        xbrl_files = downloaded.get('xbrl_files', {})
+        if xbrl_files:
+            # Create XBRL subdirectory for this filing
+            base_filename = self._generate_filename(filing_info, "", suffix="")
+            xbrl_dir = self.output_dir / f"{base_filename}_xbrl"
+            xbrl_dir.mkdir(exist_ok=True)
 
-        return html_path, md_path
+            for filename, content in xbrl_files.items():
+                xbrl_path = xbrl_dir / filename
+                with open(xbrl_path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                saved_paths.append(xbrl_path)
+
+            if xbrl_files:
+                logger.info(f"Saved {len(xbrl_files)} XBRL files to: {xbrl_dir}")
+
+        return saved_paths
 
     def download_all_for_ticker(
         self,
@@ -494,7 +594,7 @@ class SECEdgarDownloader:
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
         skip_existing: bool = True
-    ) -> List[Tuple[Path, Path]]:
+    ) -> List[List[Path]]:
         """
         Download all filings for a ticker
 
@@ -506,7 +606,7 @@ class SECEdgarDownloader:
             skip_existing: Skip already downloaded files
 
         Returns:
-            List of tuples (html_path, md_path) for downloaded filings
+            List of lists of file paths for downloaded filings
         """
         logger.info(f"Starting download for ticker: {ticker}")
 
@@ -541,21 +641,19 @@ class SECEdgarDownloader:
             # Check if already exists
             if skip_existing:
                 html_filename = self._generate_filename(filing_info, ".html")
-                md_filename = self._generate_filename(filing_info, ".md")
                 html_path = self.output_dir / html_filename
-                md_path = self.output_dir / md_filename
 
-                if html_path.exists() and md_path.exists():
+                if html_path.exists():
                     logger.debug(f"Skipping existing filing: {html_filename}")
                     skipped_count += 1
                     continue
 
             try:
                 # Download filing
-                html_content, md_content = self.download_filing(filing_info)
+                downloaded = self.download_filing(filing_info)
 
                 # Save filing
-                paths = self.save_filing(html_content, md_content, filing_info)
+                paths = self.save_filing(downloaded, filing_info)
                 downloaded_files.append(paths)
 
             except Exception as e:
@@ -575,7 +673,7 @@ class SECEdgarDownloader:
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
         skip_existing: bool = True
-    ) -> Dict[str, List[Tuple[Path, Path]]]:
+    ) -> Dict[str, List[List[Path]]]:
         """
         Download filings for multiple tickers
 
@@ -720,6 +818,12 @@ Examples:
     else:
         # Default: last 3 months
         start_date = end_date - timedelta(days=90)
+
+    # Log date range
+    if start_date:
+        logger.info(f"Date range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
+    else:
+        logger.info(f"Downloading all historical filings up to {end_date.strftime('%Y-%m-%d')}")
 
     # Create downloader
     downloader = SECEdgarDownloader(
