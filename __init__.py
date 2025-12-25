@@ -18,6 +18,11 @@ from .sec_edgar_downloader import (
     DEFAULT_OUTPUT_DIR as SEC_DEFAULT_OUTPUT_DIR,
 )
 
+from .sec_bulk_downloader import (
+    SECBulkDownloader,
+    BulkDownloadProgress,
+)
+
 __version__ = "1.0.0"
 __all__ = [
     "FoolTranscriptDownloader",
@@ -26,4 +31,6 @@ __all__ = [
     "SECEdgarDownloader",
     "SECFilingInfo",
     "SEC_DEFAULT_OUTPUT_DIR",
+    "SECBulkDownloader",
+    "BulkDownloadProgress",
 ]

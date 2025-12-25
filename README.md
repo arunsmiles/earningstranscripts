@@ -23,7 +23,9 @@ A Python toolkit for downloading:
 - Automatic fiscal year and quarter calculation
 - Supports amendments (10-K/A, 10-Q/A)
 - Configurable date ranges (default: last 3 months)
-- Bulk download for multiple tickers
+- Two download modes:
+  - **Individual mode**: Download specific tickers via API
+  - **Bulk mode**: Download from SEC's nightly bulk data (~2GB, all companies)
 
 ## Installation
 
@@ -69,6 +71,48 @@ python sec_edgar_downloader.py -t AAPL -o ./my_filings
 ```bash
 python sec_edgar_downloader.py --help
 ```
+
+### SEC EDGAR Bulk Download (Recommended for Many Tickers)
+
+**Step 1: Download SEC's bulk data (once per day):**
+```bash
+python sec_bulk_downloader.py --download-bulk-data
+```
+
+**Step 2: Download filings for tickers from a file:**
+```bash
+python sec_bulk_downloader.py --ticker-file my_tickers.txt
+```
+
+**Download top N companies from ranked list:**
+```bash
+python sec_bulk_downloader.py --ticker-file sp500.txt --top 100
+```
+
+**Download all companies (WARNING: 10,000+ companies, may take days):**
+```bash
+python sec_bulk_downloader.py --all-tickers --from 2024-01-01
+```
+
+**Download only 10-K filings:**
+```bash
+python sec_bulk_downloader.py --ticker-file my_tickers.txt --forms 10-K
+```
+
+**Ticker file format** (one ticker per line):
+```
+# Comments start with #
+AAPL
+MSFT
+GOOGL
+```
+
+**Features:**
+- Downloads SEC's nightly bulk data file (~2GB, all companies)
+- Much faster than API for multiple companies
+- Progress tracking with SQLite database
+- Automatic resume on interruption
+- Respects SEC rate limits
 
 ### Motley Fool Transcripts
 
