@@ -30,6 +30,8 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
+from config import get_config, Config
+
 # Constants
 SEC_BASE_URL = "https://www.sec.gov"
 SEC_API_BASE_URL = "https://data.sec.gov"
@@ -69,21 +71,44 @@ class SECEdgarDownloader:
 
     def __init__(
         self,
-        output_dir: str = DEFAULT_OUTPUT_DIR,
+        output_dir: Optional[str] = None,
         user_email: str = DEFAULT_USER_EMAIL,
         delay: float = REQUEST_DELAY,
-        verbose: bool = False
+        verbose: bool = False,
+        config: Optional[Config] = None,
+        data_dir: Optional[str] = None
     ):
         """
         Initialize the SEC Edgar downloader
 
         Args:
-            output_dir: Directory to save downloaded filings
+            output_dir: Directory to save downloaded filings (deprecated - use config or data_dir instead)
             user_email: Email for User-Agent header (required by SEC)
             delay: Delay between requests in seconds
             verbose: Enable debug logging
+            config: Config instance to use. If provided, output_dir is ignored
+            data_dir: Base data directory. If provided, creates a new Config with this directory
         """
-        self.output_dir = Path(output_dir)
+        # Priority: config > data_dir > output_dir > global config
+        if config:
+            self.config = config
+            self.output_dir = config.secfilings_dir
+        elif data_dir:
+            self.config = Config(data_dir)
+            self.output_dir = self.config.secfilings_dir
+        elif output_dir and output_dir != DEFAULT_OUTPUT_DIR:
+            # Backward compatibility: if explicit output_dir provided, use it directly
+            self.config = None
+            self.output_dir = Path(output_dir)
+            logger.warning(
+                "Using output_dir directly is deprecated. "
+                "Please use config=Config(data_dir) or data_dir parameter instead."
+            )
+        else:
+            # Use global config
+            self.config = get_config()
+            self.output_dir = self.config.secfilings_dir
+
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self.user_email = user_email
@@ -746,9 +771,16 @@ Examples:
     )
 
     parser.add_argument(
+        '--data-dir',
+        type=str,
+        help='Base data directory (filings will be saved to {data-dir}/secfilings/). '
+             'Can also be set via EARNINGS_DATA_DIR environment variable.'
+    )
+
+    parser.add_argument(
         '-o', '--output-dir',
-        default=DEFAULT_OUTPUT_DIR,
-        help=f'Output directory (default: {DEFAULT_OUTPUT_DIR})'
+        type=str,
+        help=f'[DEPRECATED] Output directory. Use --data-dir instead.'
     )
 
     parser.add_argument(
@@ -826,7 +858,9 @@ Examples:
         logger.info(f"Downloading all historical filings up to {end_date.strftime('%Y-%m-%d')}")
 
     # Create downloader
+    # Use data_dir if provided, otherwise fall back to output_dir for backward compatibility
     downloader = SECEdgarDownloader(
+        data_dir=args.data_dir,
         output_dir=args.output_dir,
         user_email=args.email,
         delay=args.delay,

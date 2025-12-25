@@ -1,0 +1,76 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "earnings-data-client"
+version = "0.1.0"
+description = "Download and query earnings call transcripts and SEC filings (10-K, 10-Q)"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Arunath", email = "umber-stack.79@icloud.com"}
+]
+requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Topic :: Office/Business :: Financial",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+keywords = ["earnings", "sec", "filings", "10-K", "10-Q", "transcripts", "financial", "data"]
+dependencies = [
+    "requests>=2.31.0",
+    "beautifulsoup4>=4.12.0",
+    "selenium>=4.15.0",
+    "lxml>=4.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/arunsmiles/earningstranscripts"
+"Bug Reports" = "https://github.com/arunsmiles/earningstranscripts/issues"
+"Source" = "https://github.com/arunsmiles/earningstranscripts"
+
+[project.scripts]
+earnings-config = "config:main"
+earnings-index = "indexer:main"
+earnings-query = "client:main"
+earnings-download-transcripts = "fool_transcript_downloader:main"
+earnings-download-sec = "sec_edgar_downloader:main"
+earnings-download-bulk = "sec_bulk_downloader:main"
+
+[tool.setuptools]
+py-modules = [
+    "config",
+    "models",
+    "indexer",
+    "client",
+    "fool_transcript_downloader",
+    "sec_edgar_downloader",
+    "sec_bulk_downloader",
+]
+
+[tool.black]
+line-length = 100
+target-version = ['py38', 'py39', 'py310', 'py311', 'py312']
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"

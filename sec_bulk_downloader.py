@@ -27,6 +27,7 @@ from typing import Dict, List, Optional, Set, Tuple
 import requests
 
 from sec_edgar_downloader import SECEdgarDownloader, SECFilingInfo
+from config import get_config, Config
 
 # Constants
 BULK_DATA_URL = "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip"
@@ -132,24 +133,50 @@ class SECBulkDownloader:
 
     def __init__(
         self,
-        cache_dir: str = DEFAULT_CACHE_DIR,
-        output_dir: str = DEFAULT_OUTPUT_DIR,
+        cache_dir: Optional[str] = None,
+        output_dir: Optional[str] = None,
         user_email: str = DEFAULT_USER_EMAIL,
-        verbose: bool = False
+        verbose: bool = False,
+        config: Optional[Config] = None,
+        data_dir: Optional[str] = None
     ):
         """
         Initialize bulk downloader
 
         Args:
-            cache_dir: Directory to cache bulk data
-            output_dir: Directory to save downloaded filings
+            cache_dir: Directory to cache bulk data (deprecated - use config or data_dir instead)
+            output_dir: Directory to save downloaded filings (deprecated - use config or data_dir instead)
             user_email: Email for User-Agent header
             verbose: Enable debug logging
+            config: Config instance to use. If provided, cache_dir and output_dir are ignored
+            data_dir: Base data directory. If provided, creates a new Config with this directory
         """
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        # Priority: config > data_dir > explicit cache_dir/output_dir > global config
+        if config:
+            self.config = config
+            self.cache_dir = config.cache_dir
+            self.output_dir = config.secfilings_dir
+        elif data_dir:
+            self.config = Config(data_dir)
+            self.cache_dir = self.config.cache_dir
+            self.output_dir = self.config.secfilings_dir
+        elif cache_dir or output_dir:
+            # Backward compatibility: if explicit dirs provided, use them directly
+            self.config = None
+            self.cache_dir = Path(cache_dir) if cache_dir else Path(DEFAULT_CACHE_DIR)
+            self.output_dir = Path(output_dir) if output_dir else Path(DEFAULT_OUTPUT_DIR)
+            if cache_dir != DEFAULT_CACHE_DIR or output_dir != DEFAULT_OUTPUT_DIR:
+                logger.warning(
+                    "Using cache_dir/output_dir directly is deprecated. "
+                    "Please use config=Config(data_dir) or data_dir parameter instead."
+                )
+        else:
+            # Use global config
+            self.config = get_config()
+            self.cache_dir = self.config.cache_dir
+            self.output_dir = self.config.secfilings_dir
 
-        self.output_dir = Path(output_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self.user_email = user_email
@@ -162,12 +189,19 @@ class SECBulkDownloader:
         progress_db_path = self.cache_dir / PROGRESS_DB
         self.progress = BulkDownloadProgress(progress_db_path)
 
-        # Initialize individual downloader
-        self.downloader = SECEdgarDownloader(
-            output_dir=str(output_dir),
-            user_email=user_email,
-            verbose=verbose
-        )
+        # Initialize individual downloader (pass config if available)
+        if self.config:
+            self.downloader = SECEdgarDownloader(
+                config=self.config,
+                user_email=user_email,
+                verbose=verbose
+            )
+        else:
+            self.downloader = SECEdgarDownloader(
+                output_dir=str(self.output_dir),
+                user_email=user_email,
+                verbose=verbose
+            )
 
         # Cache for submissions data
         self.submissions_cache: Dict[str, Dict] = {}
@@ -504,15 +538,22 @@ Note:
 
     # Output options
     parser.add_argument(
+        '--data-dir',
+        type=str,
+        help='Base data directory (filings will be saved to {data-dir}/secfilings/, '
+             'cache to {data-dir}/cache/). Can also be set via EARNINGS_DATA_DIR environment variable.'
+    )
+
+    parser.add_argument(
         '-o', '--output-dir',
-        default=DEFAULT_OUTPUT_DIR,
-        help=f'Output directory (default: {DEFAULT_OUTPUT_DIR})'
+        type=str,
+        help=f'[DEPRECATED] Output directory. Use --data-dir instead.'
     )
 
     parser.add_argument(
         '--cache-dir',
-        default=DEFAULT_CACHE_DIR,
-        help=f'Cache directory for bulk data (default: {DEFAULT_CACHE_DIR})'
+        type=str,
+        help=f'[DEPRECATED] Cache directory. Use --data-dir instead.'
     )
 
     # Filtering options
@@ -558,7 +599,9 @@ Note:
     args = parser.parse_args()
 
     # Create downloader
+    # Use data_dir if provided, otherwise fall back to cache_dir/output_dir for backward compatibility
     bulk_downloader = SECBulkDownloader(
+        data_dir=args.data_dir,
         cache_dir=args.cache_dir,
         output_dir=args.output_dir,
         user_email=args.email,

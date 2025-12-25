@@ -1,36 +1,50 @@
 """
-Earnings Transcripts and SEC Filings Downloader
+Earnings Data Client
 
-A Python module to download:
-- Earnings call transcripts from The Motley Fool
-- SEC EDGAR filings (10-K, 10-Q) for public companies
+Download and query earnings transcripts and SEC filings.
+
+Main Components:
+- EarningsDataClient: High-level query interface
+- Downloaders: FoolTranscriptDownloader, SECEdgarDownloader, SECBulkDownloader
+- Configuration: Centralized data directory management
 """
 
-from .fool_transcript_downloader import (
-    FoolTranscriptDownloader,
-    TranscriptInfo,
-    DEFAULT_OUTPUT_DIR as FOOL_DEFAULT_OUTPUT_DIR,
-)
+# Configuration
+from .config import Config, get_config, set_data_directory
 
-from .sec_edgar_downloader import (
-    SECEdgarDownloader,
-    SECFilingInfo,
-    DEFAULT_OUTPUT_DIR as SEC_DEFAULT_OUTPUT_DIR,
-)
+# Query Client and Models
+from .client import EarningsDataClient
+from .models import TranscriptResult, FilingResult, AggregateStats, FileIndex
 
-from .sec_bulk_downloader import (
-    SECBulkDownloader,
-    BulkDownloadProgress,
-)
+# Indexer
+from .indexer import DataIndexer
 
-__version__ = "1.0.0"
+# Downloaders
+from .fool_transcript_downloader import FoolTranscriptDownloader, TranscriptInfo
+from .sec_edgar_downloader import SECEdgarDownloader, SECFilingInfo
+from .sec_bulk_downloader import SECBulkDownloader, BulkDownloadProgress
+
+__version__ = "0.1.0"
+
 __all__ = [
+    # Configuration
+    "Config",
+    "get_config",
+    "set_data_directory",
+    # Query Client
+    "EarningsDataClient",
+    # Models
+    "TranscriptResult",
+    "FilingResult",
+    "AggregateStats",
+    "FileIndex",
+    # Indexer
+    "DataIndexer",
+    # Downloaders
     "FoolTranscriptDownloader",
     "TranscriptInfo",
-    "FOOL_DEFAULT_OUTPUT_DIR",
     "SECEdgarDownloader",
     "SECFilingInfo",
-    "SEC_DEFAULT_OUTPUT_DIR",
     "SECBulkDownloader",
     "BulkDownloadProgress",
 ]

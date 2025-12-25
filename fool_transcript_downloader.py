@@ -36,6 +36,8 @@ from selenium.webdriver.chrome.options import Options as ChromeOptions
 from selenium.webdriver.edge.options import Options as EdgeOptions
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
 
+from config import get_config, Config
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -63,16 +65,38 @@ class TranscriptInfo:
 class FoolTranscriptDownloader:
     """Downloads earnings transcripts from The Motley Fool."""
 
-    def __init__(self, output_dir: str = DEFAULT_OUTPUT_DIR, headless: bool = True, browser: str = "auto"):
+    def __init__(self, output_dir: Optional[str] = None, headless: bool = True, browser: str = "auto",
+                 config: Optional[Config] = None, data_dir: Optional[str] = None):
         """
         Initialize the downloader.
 
         Args:
-            output_dir: Directory to save transcripts
+            output_dir: Directory to save transcripts (deprecated - use config or data_dir instead)
             headless: Run browser in headless mode
             browser: Browser to use - "auto" (try Chrome then Edge), "chrome", or "edge"
+            config: Config instance to use. If provided, output_dir is ignored
+            data_dir: Base data directory. If provided, creates a new Config with this directory
         """
-        self.output_dir = Path(output_dir)
+        # Priority: config > data_dir > output_dir > global config
+        if config:
+            self.config = config
+            self.output_dir = config.transcripts_dir
+        elif data_dir:
+            self.config = Config(data_dir)
+            self.output_dir = self.config.transcripts_dir
+        elif output_dir and output_dir != DEFAULT_OUTPUT_DIR:
+            # Backward compatibility: if explicit output_dir provided, use it directly
+            self.config = None
+            self.output_dir = Path(output_dir)
+            logger.warning(
+                "Using output_dir directly is deprecated. "
+                "Please use config=Config(data_dir) or data_dir parameter instead."
+            )
+        else:
+            # Use global config
+            self.config = get_config()
+            self.output_dir = self.config.transcripts_dir
+
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.headless = headless
         self.browser = browser.lower()
@@ -781,9 +805,15 @@ def main():
         description='Download earnings transcripts from The Motley Fool'
     )
     parser.add_argument(
+        '--data-dir',
+        type=str,
+        help='Base data directory (transcripts will be saved to {data-dir}/transcripts/). '
+             'Can also be set via EARNINGS_DATA_DIR environment variable.'
+    )
+    parser.add_argument(
         '-o', '--output-dir',
-        default=DEFAULT_OUTPUT_DIR,
-        help=f'Output directory for transcripts (default: {DEFAULT_OUTPUT_DIR})'
+        type=str,
+        help=f'[DEPRECATED] Output directory for transcripts. Use --data-dir instead.'
     )
     parser.add_argument(
         '-m', '--max-pages',
@@ -844,7 +874,9 @@ def main():
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
+    # Use data_dir if provided, otherwise fall back to output_dir for backward compatibility
     downloader = FoolTranscriptDownloader(
+        data_dir=args.data_dir,
         output_dir=args.output_dir,
         headless=not args.no_headless,
         browser=args.browser

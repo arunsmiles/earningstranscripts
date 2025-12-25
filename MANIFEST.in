@@ -1,0 +1,20 @@
+# Include documentation
+include README.md
+include LICENSE
+
+# Include requirements
+include requirements.txt
+
+# Include example files
+include example_tickers.txt
+
+# Exclude unnecessary files
+exclude test_config.py
+global-exclude __pycache__
+global-exclude *.py[co]
+global-exclude .DS_Store
+
+# Exclude data directories (users will have their own)
+prune transcripts
+prune secfilings
+prune .sec_cache
