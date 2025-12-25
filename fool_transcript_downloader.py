@@ -4,11 +4,17 @@ Motley Fool Earnings Transcript Downloader v2
 This module downloads all earnings transcripts from The Motley Fool website
 and stores them with the naming convention: <stockticker>_<year>_<quarter>_earningstranscript_from_fool.md
 
-Improvements in v2:
+Usage:
+    python fool_transcript_downloader.py              # Download current month
+    python fool_transcript_downloader.py --from 2024-01 --to 2024-12  # Download range
+    python fool_transcript_downloader.py --page-scrape  # Use page scraping instead
+
+Features:
+- Sitemap-based crawling (default) - fast and comprehensive
+- Downloads current month by default (no args needed)
 - Shows file size in KB when saving
 - Detects incomplete files (<2KB) and attempts to follow redirects
 - Adds Source: <url> at the bottom of each file
-- Supports month-level granularity for sitemap crawling
 """
 
 import os
@@ -105,9 +111,13 @@ class FoolTranscriptDownloader:
         options.add_argument('--disable-gpu')
         options.add_argument('--window-size=1920,1080')
         options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+        # Disable images for faster loading
+        options.add_argument('--blink-settings=imagesEnabled=false')
 
         # Selenium 4.6+ has built-in driver management
-        return webdriver.Chrome(options=options)
+        driver = webdriver.Chrome(options=options)
+        driver.set_script_timeout(10)
+        return driver
 
     def _create_edge_driver(self) -> webdriver.Edge:
         """Create an Edge driver using Selenium's built-in driver management."""
@@ -119,9 +129,13 @@ class FoolTranscriptDownloader:
         options.add_argument('--disable-gpu')
         options.add_argument('--window-size=1920,1080')
         options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+        # Disable images for faster loading
+        options.add_argument('--blink-settings=imagesEnabled=false')
 
         # Selenium 4.6+ has built-in driver management
-        return webdriver.Edge(options=options)
+        driver = webdriver.Edge(options=options)
+        driver.set_script_timeout(10)
+        return driver
 
     def get_transcript_urls(self, max_pages: int = 50) -> list[TranscriptInfo]:
         """
@@ -319,8 +333,26 @@ class FoolTranscriptDownloader:
 
         return transcripts
 
-    def _find_redirect_url(self, soup: BeautifulSoup, current_url: str) -> Optional[str]:
-        """Look for redirect URLs in page content."""
+    def _find_redirect_url(self, soup: BeautifulSoup, current_url: str, expected_ticker: str = None) -> Optional[str]:
+        """Look for redirect URLs in page content.
+
+        Args:
+            soup: BeautifulSoup object of the page
+            current_url: Current URL being processed
+            expected_ticker: If provided, only return redirect URLs for the same ticker
+        """
+        def url_matches_ticker(url: str, ticker: str) -> bool:
+            """Check if a URL contains the expected ticker."""
+            if not ticker:
+                return True
+            # URL pattern: company-TICKER-qN-YYYY-earnings-call-transcript
+            url_lower = url.lower()
+            ticker_lower = ticker.lower()
+            # Check for ticker in URL with common patterns
+            return (f'-{ticker_lower}-q' in url_lower or
+                    f'/{ticker_lower}-q' in url_lower or
+                    f'-{ticker_lower}-' in url_lower)
+
         # Check meta refresh
         meta = soup.find('meta', attrs={'http-equiv': re.compile(r'refresh', re.I)})
         if meta:
@@ -328,67 +360,213 @@ class FoolTranscriptDownloader:
             if 'url=' in content.lower():
                 redirect_url = content.split('url=')[-1].strip().strip('"\'')
                 if redirect_url and redirect_url != current_url:
-                    return redirect_url if redirect_url.startswith('http') else urljoin(BASE_URL, redirect_url)
+                    full_url = redirect_url if redirect_url.startswith('http') else urljoin(BASE_URL, redirect_url)
+                    if url_matches_ticker(full_url, expected_ticker):
+                        return full_url
+                    else:
+                        logger.warning(f"Meta refresh URL doesn't match expected ticker {expected_ticker}: {full_url}")
 
         # Check for canonical link
         canonical = soup.find('link', rel='canonical')
         if canonical:
             href = canonical.get('href', '')
             if href and href != current_url and 'earnings-call-transcript' in href:
-                return href if href.startswith('http') else urljoin(BASE_URL, href)
+                full_url = href if href.startswith('http') else urljoin(BASE_URL, href)
+                if url_matches_ticker(full_url, expected_ticker):
+                    return full_url
+                else:
+                    logger.warning(f"Canonical URL doesn't match expected ticker {expected_ticker}: {full_url}")
 
-        # Check for transcript links in the page
+        # Check for transcript links in the page - ONLY for the same ticker
         for a in soup.find_all('a', href=True):
             href = a.get('href', '')
             if 'earnings-call-transcript' in href and href != current_url:
                 full_url = href if href.startswith('http') else urljoin(BASE_URL, href)
-                if full_url != current_url:
+                if full_url != current_url and url_matches_ticker(full_url, expected_ticker):
                     return full_url
 
         return None
 
-    def download_transcript(self, info: TranscriptInfo, max_redirects: int = 3) -> Tuple[Optional[str], str]:
+    def _verify_content_ticker(self, soup: BeautifulSoup, expected_ticker: str) -> bool:
+        """
+        Verify that the page content is for the expected ticker.
+
+        Args:
+            soup: BeautifulSoup object of the page
+            expected_ticker: The ticker symbol we expect to find
+
+        Returns:
+            True if content matches expected ticker, False otherwise
+        """
+        expected_ticker_upper = expected_ticker.upper()
+        expected_ticker_lower = expected_ticker.lower()
+
+        # Check page title
+        title = soup.find('title')
+        if title:
+            title_text = title.get_text()
+            if expected_ticker_upper in title_text or f"({expected_ticker_upper})" in title_text:
+                return True
+
+        # Check h1/h2 headers for ticker
+        for header in soup.find_all(['h1', 'h2']):
+            header_text = header.get_text()
+            if f"({expected_ticker_upper})" in header_text:
+                return True
+            # Also check for "TICKER Q" pattern in headers
+            if re.search(rf'\b{expected_ticker_upper}\b.*Q[1-4]', header_text, re.IGNORECASE):
+                return True
+
+        # Check for ticker symbol in stock/security elements
+        for elem in soup.find_all(class_=re.compile(r'ticker|symbol|stock', re.I)):
+            if expected_ticker_upper in elem.get_text().upper():
+                return True
+
+        # Check meta tags
+        for meta in soup.find_all('meta'):
+            content = meta.get('content', '')
+            if expected_ticker_upper in content.upper():
+                return True
+
+        # Check canonical URL
+        canonical = soup.find('link', rel='canonical')
+        if canonical:
+            href = canonical.get('href', '')
+            if f'-{expected_ticker_lower}-' in href.lower():
+                return True
+
+        return False
+
+    def _extract_ticker_from_content(self, soup: BeautifulSoup) -> Optional[str]:
+        """
+        Extract the actual ticker from page content.
+
+        Returns:
+            Ticker symbol found in the content, or None
+        """
+        # Check h1/h2 headers for (TICKER) pattern
+        for header in soup.find_all(['h1', 'h2']):
+            header_text = header.get_text()
+            match = re.search(r'\(([A-Z]{1,5})\)', header_text)
+            if match:
+                return match.group(1)
+
+        # Check title
+        title = soup.find('title')
+        if title:
+            match = re.search(r'\(([A-Z]{1,5})\)', title.get_text())
+            if match:
+                return match.group(1)
+
+        # Check canonical URL
+        canonical = soup.find('link', rel='canonical')
+        if canonical:
+            href = canonical.get('href', '')
+            match = re.search(r'-([a-zA-Z]{1,5})-q[1-4]-\d{4}-earnings', href, re.IGNORECASE)
+            if match:
+                return match.group(1).upper()
+
+        return None
+
+    def _fetch_page_with_selenium(self, url: str, driver=None, wait_time: int = 3, page_load_timeout: int = 15) -> Tuple[Optional[BeautifulSoup], str]:
+        """
+        Fetch a page using Selenium to render JavaScript content.
+
+        Args:
+            url: URL to fetch
+            driver: Existing driver to reuse, or None to create a new one
+            wait_time: Time to wait for JS to render after load (seconds)
+            page_load_timeout: Max time to wait for page load (seconds)
+
+        Returns:
+            Tuple of (BeautifulSoup object or None, final URL after any redirects)
+        """
+        created_driver = False
+        try:
+            if driver is None:
+                driver = self._create_driver()
+                created_driver = True
+
+            # Set page load timeout
+            driver.set_page_load_timeout(page_load_timeout)
+
+            try:
+                driver.get(url)
+            except TimeoutException:
+                logger.warning(f"Page load timed out after {page_load_timeout}s for {url}, using partial content")
+
+            time.sleep(wait_time)  # Wait for JavaScript to render
+
+            # Get the final URL (in case of redirects)
+            final_url = driver.current_url
+
+            # Get page source and parse
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            return soup, final_url
+
+        except WebDriverException as e:
+            logger.error(f"Selenium error fetching {url}: {e}")
+            return None, url
+        finally:
+            if created_driver and driver:
+                driver.quit()
+
+    def download_transcript(self, info: TranscriptInfo, driver=None) -> Tuple[Optional[str], str]:
         """
         Download a single transcript and return its content as markdown.
-        Follows redirects if content is too small.
+        Uses Selenium to render JavaScript content.
 
         Args:
             info: TranscriptInfo object with transcript details
-            max_redirects: Maximum number of redirects to follow
+            driver: Optional Selenium driver to reuse
 
         Returns:
             Tuple of (content as markdown string or None, final URL used)
         """
         url = info.url
 
-        for attempt in range(max_redirects):
-            try:
-                response = self.session.get(url, timeout=30)
-                response.raise_for_status()
+        try:
+            soup, final_url = self._fetch_page_with_selenium(url, driver=driver)
 
-                soup = BeautifulSoup(response.text, 'html.parser')
-                content = self._extract_transcript_content(soup, info, url)
-
-                size_kb = len(content.encode('utf-8')) / 1024
-
-                if size_kb < MIN_CONTENT_SIZE_KB:
-                    # Content too small, look for redirect
-                    redirect_url = self._find_redirect_url(soup, url)
-                    if redirect_url:
-                        logger.warning(f"Content too small ({size_kb:.1f}KB), following redirect: {redirect_url}")
-                        url = redirect_url
-                        continue
-                    else:
-                        logger.warning(f"Content small ({size_kb:.1f}KB) but no redirect found for {url}")
-
-                return content, url
-
-            except requests.RequestException as e:
-                logger.error(f"Failed to download {url}: {e}")
+            if soup is None:
                 return None, url
 
-        logger.error(f"Max redirects reached for {info.url}")
-        return None, url
+            # Check if we were redirected to a different company's page
+            if final_url != url:
+                logger.debug(f"Page redirected: {url} -> {final_url}")
+                # Verify the redirect is for the same ticker
+                redirect_info = self._parse_transcript_url(final_url)
+                if redirect_info and redirect_info.ticker.upper() != info.ticker.upper():
+                    logger.error(f"REDIRECT MISMATCH: Expected {info.ticker} but redirected to {redirect_info.ticker}")
+                    logger.error(f"Original URL: {url}")
+                    logger.error(f"Redirect URL: {final_url}")
+                    logger.error(f"Skipping this transcript to avoid saving wrong company data")
+                    return None, final_url
+
+            # Verify content matches expected ticker BEFORE processing
+            if not self._verify_content_ticker(soup, info.ticker):
+                actual_ticker = self._extract_ticker_from_content(soup)
+                if actual_ticker and actual_ticker.upper() != info.ticker.upper():
+                    logger.error(f"TICKER MISMATCH: Expected {info.ticker} but page contains {actual_ticker}")
+                    logger.error(f"URL: {final_url}")
+                    logger.error(f"Skipping this transcript to avoid saving wrong company data")
+                    return None, final_url
+                elif not actual_ticker:
+                    logger.warning(f"Could not verify ticker {info.ticker} in page content at {final_url}")
+                    # Continue but warn - might be a parsing issue
+
+            content = self._extract_transcript_content(soup, info, final_url)
+
+            size_kb = len(content.encode('utf-8')) / 1024
+
+            if size_kb < MIN_CONTENT_SIZE_KB:
+                logger.warning(f"Content small ({size_kb:.1f}KB) for {info.ticker} at {final_url}")
+
+            return content, final_url
+
+        except Exception as e:
+            logger.error(f"Failed to download {url}: {e}")
+            return None, url
 
     def _extract_transcript_content(self, soup: BeautifulSoup, info: TranscriptInfo, source_url: str) -> str:
         """Extract and format transcript content as markdown."""
@@ -400,13 +578,23 @@ class FoolTranscriptDownloader:
         content_parts.append("---")
         content_parts.append("")
 
-        # Try to find the main article content
-        # The transcript is typically in an article or main content section
-        article = soup.find('article') or soup.find('main') or soup.find('div', class_=re.compile(r'article|content|transcript', re.I))
+        # Try to find the main content container - pick the one with most content
+        candidates = [
+            soup.find('main'),
+            soup.find('article'),
+            soup.find('div', class_=re.compile(r'transcript|content', re.I)),
+            soup.find('div', {'id': re.compile(r'content|article', re.I)}),
+        ]
 
-        if not article:
-            # Fallback: try to find content div
-            article = soup.find('div', {'id': re.compile(r'content|article', re.I)})
+        # Pick the candidate with the most text content
+        article = None
+        max_len = 0
+        for candidate in candidates:
+            if candidate:
+                text_len = len(candidate.get_text())
+                if text_len > max_len:
+                    max_len = text_len
+                    article = candidate
 
         if not article:
             article = soup.body
@@ -492,58 +680,88 @@ class FoolTranscriptDownloader:
 
         return filepath, size_kb
 
-    def download_all(self, max_pages: int = 50, delay: float = 1.0, use_sitemap: bool = False,
-                     start_year: int = 2020, end_year: int = 2025,
-                     start_month: int = 1, end_month: int = 12) -> list[Path]:
+    def download_all(self, max_pages: int = 50, delay: float = 1.0, use_page_scrape: bool = False,
+                     start: str = None, end: str = None, ticker: str = None) -> list[Path]:
         """
         Download all available transcripts.
 
         Args:
             max_pages: Maximum number of "Load More" clicks (for page scraping mode)
             delay: Delay between downloads (seconds) to be respectful
-            use_sitemap: If True, use sitemap crawling instead of page scraping
-            start_year: Start year for sitemap crawling
-            end_year: End year for sitemap crawling
-            start_month: Start month for sitemap crawling (1-12)
-            end_month: End month for sitemap crawling (1-12)
+            use_page_scrape: If True, use page scraping instead of sitemap crawling (default)
+            start: Start month in YYYY-MM format (default: current month)
+            end: End month in YYYY-MM format (default: same as start)
+            ticker: If provided, only download transcripts for this ticker
 
         Returns:
             List of paths to saved files
         """
-        if use_sitemap:
+        if use_page_scrape:
+            transcripts = self.get_transcript_urls(max_pages=max_pages)
+        else:
+            # Parse start/end dates, defaulting to current month
+            from datetime import datetime
+            now = datetime.now()
+
+            if start:
+                start_year, start_month = map(int, start.split('-'))
+            else:
+                start_year, start_month = now.year, now.month
+
+            if end:
+                end_year, end_month = map(int, end.split('-'))
+            else:
+                end_year, end_month = start_year, start_month
+
             transcripts = self.get_transcript_urls_from_sitemap(
                 start_year=start_year, end_year=end_year,
                 start_month=start_month, end_month=end_month
             )
-        else:
-            transcripts = self.get_transcript_urls(max_pages=max_pages)
+
+        # Filter by ticker if specified
+        if ticker:
+            ticker_upper = ticker.upper()
+            transcripts = [t for t in transcripts if t.ticker.upper() == ticker_upper]
+            logger.info(f"Filtered to {len(transcripts)} transcripts for ticker {ticker_upper}")
 
         saved_files = []
         skipped_small = []
 
-        for i, info in enumerate(transcripts, 1):
-            logger.info(f"Downloading {i}/{len(transcripts)}: {info.ticker} {info.quarter} {info.year}")
+        # Create a single driver to reuse for all downloads
+        driver = None
+        try:
+            if transcripts:
+                logger.info("Starting Selenium browser for transcript downloads...")
+                driver = self._create_driver()
 
-            # Check if already downloaded
-            filename = f"{info.ticker}_{info.year}_{info.quarter}_earningstranscript_from_fool.md"
-            filepath = self.output_dir / filename
-            if filepath.exists():
-                size_kb = filepath.stat().st_size / 1024
-                logger.info(f"Already exists ({size_kb:.1f}KB), skipping: {filename}")
-                saved_files.append(filepath)
-                continue
+            for i, info in enumerate(transcripts, 1):
+                logger.info(f"Downloading {i}/{len(transcripts)}: {info.ticker} {info.quarter} {info.year}")
 
-            content, final_url = self.download_transcript(info)
-            if content:
-                saved_path, size_kb = self.save_transcript(info, content)
-                saved_files.append(saved_path)
+                # Check if already downloaded
+                filename = f"{info.ticker}_{info.year}_{info.quarter}_earningstranscript_from_fool.md"
+                filepath = self.output_dir / filename
+                if filepath.exists():
+                    size_kb = filepath.stat().st_size / 1024
+                    logger.info(f"Already exists ({size_kb:.1f}KB), skipping: {filename}")
+                    saved_files.append(filepath)
+                    continue
 
-                if size_kb < MIN_CONTENT_SIZE_KB:
-                    skipped_small.append((saved_path, size_kb))
+                content, final_url = self.download_transcript(info, driver=driver)
+                if content:
+                    saved_path, size_kb = self.save_transcript(info, content)
+                    saved_files.append(saved_path)
 
-            # Be respectful with delays between requests
-            if i < len(transcripts):
-                time.sleep(delay)
+                    if size_kb < MIN_CONTENT_SIZE_KB:
+                        skipped_small.append((saved_path, size_kb))
+
+                # Be respectful with delays between requests
+                if i < len(transcripts):
+                    time.sleep(delay)
+
+        finally:
+            if driver:
+                logger.info("Closing Selenium browser...")
+                driver.quit()
 
         logger.info(f"Download complete! Saved {len(saved_files)} transcripts to {self.output_dir}")
 
@@ -596,35 +814,29 @@ def main():
         help='Enable verbose logging'
     )
     parser.add_argument(
-        '--sitemap',
+        '--page-scrape',
         action='store_true',
-        help='Use sitemap crawling instead of page scraping (more comprehensive)'
+        help='Use page scraping instead of sitemap crawling'
     )
     parser.add_argument(
-        '--start-year',
-        type=int,
-        default=2020,
-        help='Start year for sitemap crawling (default: 2020)'
+        '--from',
+        dest='start',
+        type=str,
+        metavar='YYYY-MM',
+        help='Start month for sitemap crawling (default: current month)'
     )
     parser.add_argument(
-        '--end-year',
-        type=int,
-        default=2025,
-        help='End year for sitemap crawling (default: 2025)'
+        '--to',
+        dest='end',
+        type=str,
+        metavar='YYYY-MM',
+        help='End month for sitemap crawling (default: same as --from)'
     )
     parser.add_argument(
-        '--start-month',
-        type=int,
-        default=1,
-        choices=range(1, 13),
-        help='Start month for sitemap crawling (default: 1)'
-    )
-    parser.add_argument(
-        '--end-month',
-        type=int,
-        default=12,
-        choices=range(1, 13),
-        help='End month for sitemap crawling (default: 12)'
+        '-t', '--ticker',
+        type=str,
+        metavar='SYMBOL',
+        help='Only download transcripts for this ticker symbol (e.g., MSFT, AAPL)'
     )
 
     args = parser.parse_args()
@@ -641,11 +853,10 @@ def main():
     downloader.download_all(
         max_pages=args.max_pages,
         delay=args.delay,
-        use_sitemap=args.sitemap,
-        start_year=args.start_year,
-        end_year=args.end_year,
-        start_month=args.start_month,
-        end_month=args.end_month
+        use_page_scrape=args.page_scrape,
+        start=args.start,
+        end=args.end,
+        ticker=args.ticker
     )
 
 
