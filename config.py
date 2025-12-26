@@ -192,8 +192,8 @@ def get_data_directory() -> Path:
     return get_config().data_dir
 
 
-if __name__ == "__main__":
-    # CLI for managing configuration
+def main():
+    """CLI entry point for managing configuration."""
     import argparse
 
     parser = argparse.ArgumentParser(description="Manage earnings data configuration")
@@ -238,3 +238,7 @@ if __name__ == "__main__":
         print(f"    - {config.cache_dir}")
     else:
         parser.print_help()
+
+
+if __name__ == "__main__":
+    main()
