@@ -1,0 +1,26 @@
+{
+  "schedules": [
+    {
+      "name": "daily_transcripts",
+      "enabled": true,
+      "job_type": "transcripts",
+      "schedule": {
+        "type": "daily",
+        "time": "02:00"
+      },
+      "options": {}
+    }
+  ],
+  "logging": {
+    "level": "INFO",
+    "file": "~/.earnings_data/logs/scheduler.log",
+    "rotation": "daily",
+    "retention_days": 30
+  },
+  "error_handling": {
+    "max_retries": 3,
+    "retry_delay_minutes": 15,
+    "send_notifications": false,
+    "notification_email": null
+  }
+}

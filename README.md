@@ -27,6 +27,17 @@ A Python toolkit for downloading:
   - **Individual mode**: Download specific tickers via API
   - **Bulk mode**: Download from SEC's nightly bulk data (~2GB, all companies)
 
+### 🆕 Automated Scheduler
+- **Dynamic job queue** - Add, remove, and modify jobs at runtime
+- **Persistent storage** - Jobs survive restarts (SQLite-backed)
+- **Multiple schedules** - Daily, weekly, interval, and cron expressions
+- **One-time jobs** - Queue immediate downloads on-demand
+- **Concurrent execution** - Run multiple jobs in parallel
+- **Automatic retry** - Robust error handling with exponential backoff
+- **Cross-platform** - Works on Linux, macOS, and Windows
+
+See [SCHEDULER.md](SCHEDULER.md) for complete documentation.
+
 ## Installation
 
 ```bash
