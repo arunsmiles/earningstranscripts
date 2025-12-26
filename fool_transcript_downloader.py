@@ -7,6 +7,7 @@ and stores them with the naming convention: <stockticker>_<year>_<quarter>_earni
 Usage:
     python fool_transcript_downloader.py              # Download current month
     python fool_transcript_downloader.py --from 2024-01 --to 2024-12  # Download range
+    python fool_transcript_downloader.py --ticker AAPL --all  # Download all available for ticker
     python fool_transcript_downloader.py --page-scrape  # Use page scraping instead
 
 Features:
@@ -98,6 +99,14 @@ class FoolTranscriptDownloader:
             self.output_dir = self.config.transcripts_dir
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Setup sitemap cache directory
+        if self.config:
+            self.sitemap_cache_dir = self.config.cache_dir / "sitemaps"
+            self.sitemap_cache_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            self.sitemap_cache_dir = None
+        
         self.headless = headless
         self.browser = browser.lower()
         self.session = requests.Session()
@@ -233,6 +242,57 @@ class FoolTranscriptDownloader:
 
         return transcripts
 
+    def _get_cached_sitemap(self, year: int, month: int) -> Optional[str]:
+        """Get cached sitemap content if available and not expired.
+        
+        Args:
+            year: Year of the sitemap
+            month: Month of the sitemap
+            
+        Returns:
+            Cached sitemap content if valid, None otherwise
+        """
+        if not self.sitemap_cache_dir:
+            return None
+            
+        cache_file = self.sitemap_cache_dir / f"sitemap_{year}_{month:02d}.xml"
+        
+        if not cache_file.exists():
+            return None
+            
+        # Check if cache is expired
+        from datetime import datetime
+        now = datetime.now()
+        is_current_month = (year == now.year and month == now.month)
+        
+        # Historical sitemaps: never expire (cached indefinitely)
+        # Current month sitemap: cache for 1 day only
+        if is_current_month:
+            file_mtime = datetime.fromtimestamp(cache_file.stat().st_mtime)
+            age_hours = divmod((now - file_mtime).seconds, 3600)[0]
+            
+            if age_hours > 12:
+                logger.debug(f"Sitemap cache expired for current month {year}/{month:02d} (age: {age_hours} hours)")
+                return None
+            
+        logger.debug(f"Using cached sitemap for {year}/{month:02d}")
+        return cache_file.read_text(encoding='utf-8')
+    
+    def _save_sitemap_to_cache(self, year: int, month: int, content: str) -> None:
+        """Save sitemap content to cache.
+        
+        Args:
+            year: Year of the sitemap
+            month: Month of the sitemap
+            content: Sitemap XML content
+        """
+        if not self.sitemap_cache_dir:
+            return
+            
+        cache_file = self.sitemap_cache_dir / f"sitemap_{year}_{month:02d}.xml"
+        cache_file.write_text(content, encoding='utf-8')
+        logger.debug(f"Saved sitemap to cache: {cache_file}")
+
     def get_transcript_urls_from_sitemap(self, start_year: int = 2020, end_year: int = 2025,
                                           start_month: int = 1, end_month: int = 12) -> list[TranscriptInfo]:
         """
@@ -263,16 +323,32 @@ class FoolTranscriptDownloader:
                     break
 
                 sitemap_url = f"{SITEMAP_INDEX_URL}{year}/{month:02d}"
-                logger.info(f"Fetching sitemap: {sitemap_url}")
+                
+                # Try to get cached sitemap first
+                sitemap_content = self._get_cached_sitemap(year, month)
+                
+                if sitemap_content is None:
+                    # Not cached or expired, fetch from web
+                    logger.info(f"Fetching sitemap: {sitemap_url}")
+                    try:
+                        response = self.session.get(sitemap_url, timeout=30)
+                        if response.status_code != 200:
+                            logger.debug(f"Sitemap not found: {sitemap_url}")
+                            continue
+                        
+                        sitemap_content = response.text
+                        # Save to cache
+                        self._save_sitemap_to_cache(year, month, sitemap_content)
+                        
+                    except requests.RequestException as e:
+                        logger.warning(f"Failed to fetch {sitemap_url}: {e}")
+                        continue
+                else:
+                    logger.info(f"Using cached sitemap: {year}/{month:02d}")
 
                 try:
-                    response = self.session.get(sitemap_url, timeout=30)
-                    if response.status_code != 200:
-                        logger.debug(f"Sitemap not found: {sitemap_url}")
-                        continue
-
                     # Parse XML sitemap
-                    soup = BeautifulSoup(response.text, 'xml')
+                    soup = BeautifulSoup(sitemap_content, 'xml')
                     urls = soup.find_all('loc')
 
                     for url_elem in urls:
@@ -285,8 +361,8 @@ class FoolTranscriptDownloader:
                     logger.info(f"Found {len(transcripts)} transcripts so far...")
                     time.sleep(0.5)  # Be respectful
 
-                except requests.RequestException as e:
-                    logger.warning(f"Failed to fetch {sitemap_url}: {e}")
+                except Exception as e:
+                    logger.warning(f"Failed to parse sitemap {sitemap_url}: {e}")
                     continue
 
         logger.info(f"Total transcripts found from sitemaps: {len(transcripts)}")
@@ -868,11 +944,27 @@ def main():
         metavar='SYMBOL',
         help='Only download transcripts for this ticker symbol (e.g., MSFT, AAPL)'
     )
+    parser.add_argument(
+        '--all',
+        action='store_true',
+        help='Download all available transcripts (sets date range from 2020-01 to present)'
+    )
 
     args = parser.parse_args()
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
+
+    # Handle --all flag: set date range from 2020-01 to present
+    start = args.start
+    end = args.end
+    if args.all:
+        if not args.ticker:
+            logger.warning("--all flag is typically used with --ticker to download all transcripts for a specific company")
+        start = '2019-04'
+        from datetime import datetime
+        end = datetime.now().strftime('%Y-%m')
+        logger.info(f"--all flag: downloading from {start} to {end}")
 
     # Use data_dir if provided, otherwise fall back to output_dir for backward compatibility
     downloader = FoolTranscriptDownloader(
@@ -886,8 +978,8 @@ def main():
         max_pages=args.max_pages,
         delay=args.delay,
         use_page_scrape=args.page_scrape,
-        start=args.start,
-        end=args.end,
+        start=start,
+        end=end,
         ticker=args.ticker
     )
 
