@@ -20,6 +20,7 @@ setup(
     url="https://github.com/arunsmiles/earningstranscripts",
 
     # Package discovery
+    packages=["scheduler"],
     py_modules=[
         "config",
         "models",
@@ -36,6 +37,8 @@ setup(
         "beautifulsoup4>=4.12.0",
         "selenium>=4.15.0",
         "lxml>=4.9.0",
+        "apscheduler>=3.10.0",
+        "python-dotenv>=1.0.0",
     ],
 
     # Optional dependencies
@@ -59,6 +62,7 @@ setup(
             "earnings-download-transcripts=fool_transcript_downloader:main",
             "earnings-download-sec=sec_edgar_downloader:main",
             "earnings-download-bulk=sec_bulk_downloader:main",
+            "earnings-scheduler=scheduler.cli:main",
         ],
     },
 

@@ -1,0 +1,87 @@
+{
+  "schedules": [
+    {
+      "name": "daily_all_transcripts",
+      "enabled": true,
+      "job_type": "transcripts",
+      "schedule": {
+        "type": "daily",
+        "time": "02:00"
+      },
+      "options": {
+        "all": false,
+        "delay": 1.0
+      },
+      "comment": "Downloads current month transcripts daily at 2 AM"
+    },
+    {
+      "name": "weekly_historical_sync",
+      "enabled": true,
+      "job_type": "transcripts",
+      "schedule": {
+        "type": "weekly",
+        "day": "sunday",
+        "time": "03:00"
+      },
+      "options": {
+        "all": true,
+        "delay": 2.0
+      },
+      "comment": "Full historical sync every Sunday at 3 AM"
+    },
+    {
+      "name": "sec_filings_monitor",
+      "enabled": true,
+      "job_type": "sec",
+      "schedule": {
+        "type": "interval",
+        "hours": 6
+      },
+      "options": {
+        "tickers": ["AAPL", "MSFT", "GOOGL", "AMZN"],
+        "forms": ["10-K", "10-Q"],
+        "all": false
+      },
+      "comment": "Check for new SEC filings every 6 hours for major tickers"
+    },
+    {
+      "name": "rebuild_index",
+      "enabled": true,
+      "job_type": "index",
+      "schedule": {
+        "type": "daily",
+        "time": "04:00"
+      },
+      "options": {
+        "rebuild": false
+      },
+      "comment": "Update index daily after transcript downloads"
+    },
+    {
+      "name": "monthly_full_reindex",
+      "enabled": false,
+      "job_type": "index",
+      "schedule": {
+        "type": "cron",
+        "cron": "0 5 1 * *"
+      },
+      "options": {
+        "rebuild": true
+      },
+      "comment": "Full index rebuild on 1st of each month at 5 AM (currently disabled)"
+    }
+  ],
+  "logging": {
+    "level": "INFO",
+    "file": "~/.earnings_data/logs/scheduler.log",
+    "rotation": "daily",
+    "retention_days": 30,
+    "max_bytes": 10485760
+  },
+  "error_handling": {
+    "max_retries": 3,
+    "retry_delay_minutes": 15,
+    "send_notifications": false,
+    "notification_email": null
+  }
+}
