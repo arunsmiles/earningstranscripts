@@ -12,6 +12,9 @@ Usage:
 
 Features:
 - Sitemap-based crawling (default) - fast and comprehensive
+- Two-tier caching system for maximum performance:
+  * L1 Cache: Raw XML sitemap files (never expire for historical months, 12hr TTL for current month)
+  * L2 Cache: SQLite database with parsed transcript metadata (enables fast ticker queries)
 - Downloads current month by default (no args needed)
 - Shows file size in KB when saving
 - Detects incomplete files (<2KB) and attempts to follow redirects
@@ -21,11 +24,13 @@ Features:
 import os
 import re
 import time
+import sqlite3
 import logging
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 from urllib.parse import urljoin
+from datetime import datetime, timedelta
 
 import requests
 from bs4 import BeautifulSoup
@@ -100,12 +105,16 @@ class FoolTranscriptDownloader:
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Setup sitemap cache directory
+        # Setup two-tier caching: file cache (L1) and database (L2)
         if self.config:
             self.sitemap_cache_dir = self.config.cache_dir / "sitemaps"
             self.sitemap_cache_dir.mkdir(parents=True, exist_ok=True)
+            self.sitemap_db_path = self.config.cache_dir / "sitemap_index.db"
+            self.config.cache_dir.mkdir(parents=True, exist_ok=True)
+            self._init_sitemap_db()
         else:
             self.sitemap_cache_dir = None
+            self.sitemap_db_path = None
         
         self.headless = headless
         self.browser = browser.lower()
@@ -242,8 +251,208 @@ class FoolTranscriptDownloader:
 
         return transcripts
 
-    def _get_cached_sitemap(self, year: int, month: int) -> Optional[str]:
-        """Get cached sitemap content if available and not expired.
+    def _init_sitemap_db(self) -> None:
+        """Initialize the sitemap database with required tables."""
+        conn = sqlite3.connect(self.sitemap_db_path)
+        cursor = conn.cursor()
+        
+        # Create transcripts table to store all transcript metadata from sitemaps
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS transcripts (
+                url TEXT PRIMARY KEY,
+                ticker TEXT NOT NULL,
+                year TEXT NOT NULL,
+                quarter TEXT NOT NULL,
+                company_name TEXT NOT NULL,
+                sitemap_year INTEGER NOT NULL,
+                sitemap_month INTEGER NOT NULL,
+                last_updated TIMESTAMP NOT NULL
+            )
+        ''')
+        
+        # Create index for fast ticker lookups
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_ticker 
+            ON transcripts(ticker)
+        ''')
+        
+        # Create index for sitemap year/month lookups
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_sitemap_date 
+            ON transcripts(sitemap_year, sitemap_month)
+        ''')
+        
+        # Create metadata table to track when sitemaps were last fetched
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sitemap_metadata (
+                year INTEGER NOT NULL,
+                month INTEGER NOT NULL,
+                last_fetched TIMESTAMP NOT NULL,
+                PRIMARY KEY (year, month)
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+        logger.debug(f"Initialized sitemap database: {self.sitemap_db_path}")
+
+    def _should_refresh_current_month(self) -> bool:
+        """Check if current month's sitemap should be refreshed (12-hour TTL)."""
+        if not self.sitemap_db_path:
+            return True
+            
+        now = datetime.now()
+        current_year = now.year
+        current_month = now.month
+        
+        conn = sqlite3.connect(self.sitemap_db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT last_fetched FROM sitemap_metadata 
+            WHERE year = ? AND month = ?
+        ''', (current_year, current_month))
+        
+        result = cursor.fetchone()
+        conn.close()
+        
+        if not result:
+            return True
+            
+        last_fetched = datetime.fromisoformat(result[0])
+        age = now - last_fetched
+        
+        # Refresh if older than 12 hours
+        should_refresh = age > timedelta(hours=12)
+        if should_refresh:
+            logger.debug(f"Current month sitemap is {age.total_seconds()/3600:.1f} hours old, refreshing...")
+        else:
+            logger.debug(f"Current month sitemap is {age.total_seconds()/3600:.1f} hours old, using cached data")
+        
+        return should_refresh
+
+    def _update_sitemap_db(self, year: int, month: int, transcripts: List[TranscriptInfo]) -> None:
+        """Update database with transcripts from a sitemap."""
+        if not self.sitemap_db_path:
+            return
+            
+        conn = sqlite3.connect(self.sitemap_db_path)
+        cursor = conn.cursor()
+        now = datetime.now().isoformat()
+        
+        # For current month, delete existing entries first (upsert)
+        current_date = datetime.now()
+        is_current_month = (year == current_date.year and month == current_date.month)
+        
+        if is_current_month:
+            cursor.execute('''
+                DELETE FROM transcripts 
+                WHERE sitemap_year = ? AND sitemap_month = ?
+            ''', (year, month))
+            logger.debug(f"Cleared existing entries for {year}/{month:02d}")
+        
+        # Insert new transcripts
+        for t in transcripts:
+            cursor.execute('''
+                INSERT OR REPLACE INTO transcripts 
+                (url, ticker, year, quarter, company_name, sitemap_year, sitemap_month, last_updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (t.url, t.ticker, t.year, t.quarter, t.company_name, year, month, now))
+        
+        # Update metadata
+        cursor.execute('''
+            INSERT OR REPLACE INTO sitemap_metadata (year, month, last_fetched)
+            VALUES (?, ?, ?)
+        ''', (year, month, now))
+        
+        conn.commit()
+        conn.close()
+        logger.debug(f"Updated database with {len(transcripts)} transcripts from {year}/{month:02d}")
+
+    def _get_transcripts_from_db(self, ticker: Optional[str] = None, 
+                                  start_year: int = 2020, end_year: int = 2025,
+                                  start_month: int = 1, end_month: int = 12) -> List[TranscriptInfo]:
+        """Query transcripts from database."""
+        if not self.sitemap_db_path:
+            return []
+            
+        conn = sqlite3.connect(self.sitemap_db_path)
+        cursor = conn.cursor()
+        
+        # Build query based on parameters
+        if ticker:
+            cursor.execute('''
+                SELECT url, ticker, year, quarter, company_name 
+                FROM transcripts 
+                WHERE ticker = ?
+                ORDER BY year DESC, quarter DESC
+            ''', (ticker,))
+        else:
+            # Date range query
+            cursor.execute('''
+                SELECT url, ticker, year, quarter, company_name 
+                FROM transcripts 
+                WHERE (sitemap_year > ? OR (sitemap_year = ? AND sitemap_month >= ?))
+                  AND (sitemap_year < ? OR (sitemap_year = ? AND sitemap_month <= ?))
+                ORDER BY year DESC, quarter DESC
+            ''', (start_year, start_year, start_month, end_year, end_year, end_month))
+        
+        results = cursor.fetchall()
+        conn.close()
+        
+        transcripts = [
+            TranscriptInfo(url=r[0], ticker=r[1], year=r[2], quarter=r[3], company_name=r[4])
+            for r in results
+        ]
+        
+        return transcripts
+
+    def _ensure_sitemaps_in_db(self, start_year: int, end_year: int, 
+                                start_month: int, end_month: int, 
+                                force_refresh_current: bool = True) -> None:
+        """Ensure sitemaps are loaded into database, refreshing current month if needed."""
+        if not self.sitemap_db_path:
+            return
+            
+        now = datetime.now()
+        current_year = now.year
+        current_month = now.month
+        
+        # Check if we need to refresh current month
+        should_refresh_current = force_refresh_current and self._should_refresh_current_month()
+        
+        # Process each month in the range
+        for year in range(start_year, end_year + 1):
+            m_start = start_month if year == start_year else 1
+            m_end = end_month if year == end_year else 12
+            
+            for month in range(m_start, m_end + 1):
+                # Skip future months
+                if year == now.year and month > now.month:
+                    break
+                
+                is_current_month = (year == current_year and month == current_month)
+                
+                # Check if this sitemap is already in DB
+                conn = sqlite3.connect(self.sitemap_db_path)
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT COUNT(*) FROM sitemap_metadata 
+                    WHERE year = ? AND month = ?
+                ''', (year, month))
+                exists = cursor.fetchone()[0] > 0
+                conn.close()
+                
+                # Fetch if: doesn't exist, OR is current month and needs refresh
+                if not exists or (is_current_month and should_refresh_current):
+                    logger.info(f"Fetching sitemap: {year}/{month:02d}")
+                    transcripts = self._fetch_and_parse_sitemap(year, month)
+                    self._update_sitemap_db(year, month, transcripts)
+                else:
+                    logger.debug(f"Sitemap {year}/{month:02d} already in database")
+
+    def _get_cached_sitemap_file(self, year: int, month: int) -> Optional[str]:
+        """Get cached sitemap from file if available and not expired (L1 cache).
         
         Args:
             year: Year of the sitemap
@@ -261,25 +470,24 @@ class FoolTranscriptDownloader:
             return None
             
         # Check if cache is expired
-        from datetime import datetime
         now = datetime.now()
         is_current_month = (year == now.year and month == now.month)
         
         # Historical sitemaps: never expire (cached indefinitely)
-        # Current month sitemap: cache for 1 day only
+        # Current month sitemap: check age
         if is_current_month:
             file_mtime = datetime.fromtimestamp(cache_file.stat().st_mtime)
-            age_hours = divmod((now - file_mtime).seconds, 3600)[0]
+            age = now - file_mtime
             
-            if age_hours > 12:
-                logger.debug(f"Sitemap cache expired for current month {year}/{month:02d} (age: {age_hours} hours)")
+            if age > timedelta(hours=12):
+                logger.debug(f"File cache expired for current month {year}/{month:02d} (age: {age.total_seconds()/3600:.1f} hours)")
                 return None
             
-        logger.debug(f"Using cached sitemap for {year}/{month:02d}")
+        logger.debug(f"Using cached sitemap file for {year}/{month:02d}")
         return cache_file.read_text(encoding='utf-8')
     
-    def _save_sitemap_to_cache(self, year: int, month: int, content: str) -> None:
-        """Save sitemap content to cache.
+    def _save_sitemap_to_file(self, year: int, month: int, content: str) -> None:
+        """Save sitemap content to file cache (L1 cache).
         
         Args:
             year: Year of the sitemap
@@ -291,12 +499,63 @@ class FoolTranscriptDownloader:
             
         cache_file = self.sitemap_cache_dir / f"sitemap_{year}_{month:02d}.xml"
         cache_file.write_text(content, encoding='utf-8')
-        logger.debug(f"Saved sitemap to cache: {cache_file}")
+        logger.debug(f"Saved sitemap to file cache: {cache_file}")
+
+    def _fetch_and_parse_sitemap(self, year: int, month: int) -> List[TranscriptInfo]:
+        """Fetch and parse a single sitemap using two-tier cache (file then database).
+        
+        Cache strategy:
+        1. Try file cache (L1) - fast, stores raw XML
+        2. If miss, fetch from web and save to file
+        3. Parse and return results
+        """
+        sitemap_url = f"{SITEMAP_INDEX_URL}{year}/{month:02d}"
+        transcripts = []
+        
+        # Try file cache first (L1)
+        sitemap_content = self._get_cached_sitemap_file(year, month)
+        
+        if sitemap_content is None:
+            # File cache miss, fetch from web
+            logger.info(f"Fetching sitemap: {sitemap_url}")
+            try:
+                response = self.session.get(sitemap_url, timeout=30)
+                if response.status_code != 200:
+                    logger.debug(f"Sitemap not found: {sitemap_url}")
+                    return transcripts
+                
+                sitemap_content = response.text
+                # Save to file cache
+                self._save_sitemap_to_file(year, month, sitemap_content)
+                
+            except requests.RequestException as e:
+                logger.warning(f"Failed to fetch {sitemap_url}: {e}")
+                return transcripts
+        
+        # Parse XML sitemap
+        try:
+            soup = BeautifulSoup(sitemap_content, 'xml')
+            urls = soup.find_all('loc')
+            
+            for url_elem in urls:
+                url = url_elem.get_text(strip=True)
+                # Some URLs are truncated (earnings-call-transcrip instead of earnings-call-transcript)
+                if '/earnings/call-transcripts/' in url and '-earnings' in url:
+                    info = self._parse_transcript_url(url)
+                    if info and not any(t.url == info.url for t in transcripts):
+                        transcripts.append(info)
+            
+            time.sleep(0.5)  # Be respectful
+            
+        except Exception as e:
+            logger.warning(f"Failed to parse sitemap {sitemap_url}: {e}")
+        
+        return transcripts
 
     def get_transcript_urls_from_sitemap(self, start_year: int = 2020, end_year: int = 2025,
                                           start_month: int = 1, end_month: int = 12) -> list[TranscriptInfo]:
         """
-        Scrape transcript URLs from the sitemap archives.
+        Scrape transcript URLs from the sitemap archives using database cache.
 
         Args:
             start_year: Year to start searching from
@@ -308,70 +567,22 @@ class FoolTranscriptDownloader:
             List of TranscriptInfo objects
         """
         logger.info(f"Crawling sitemaps from {start_year}/{start_month:02d} to {end_year}/{end_month:02d}...")
-        transcripts = []
-
-        # Crawl monthly sitemaps
-        for year in range(start_year, end_year + 1):
-            m_start = start_month if year == start_year else 1
-            m_end = end_month if year == end_year else 12
-
-            for month in range(m_start, m_end + 1):
-                # Skip future months
-                from datetime import datetime
-                now = datetime.now()
-                if year == now.year and month > now.month:
-                    break
-
-                sitemap_url = f"{SITEMAP_INDEX_URL}{year}/{month:02d}"
-                
-                # Try to get cached sitemap first
-                sitemap_content = self._get_cached_sitemap(year, month)
-                
-                if sitemap_content is None:
-                    # Not cached or expired, fetch from web
-                    logger.info(f"Fetching sitemap: {sitemap_url}")
-                    try:
-                        response = self.session.get(sitemap_url, timeout=30)
-                        if response.status_code != 200:
-                            logger.debug(f"Sitemap not found: {sitemap_url}")
-                            continue
-                        
-                        sitemap_content = response.text
-                        # Save to cache
-                        self._save_sitemap_to_cache(year, month, sitemap_content)
-                        
-                    except requests.RequestException as e:
-                        logger.warning(f"Failed to fetch {sitemap_url}: {e}")
-                        continue
-                else:
-                    logger.info(f"Using cached sitemap: {year}/{month:02d}")
-
-                try:
-                    # Parse XML sitemap
-                    soup = BeautifulSoup(sitemap_content, 'xml')
-                    urls = soup.find_all('loc')
-
-                    for url_elem in urls:
-                        url = url_elem.get_text(strip=True)
-                        if '/earnings/call-transcripts/' in url and 'earnings-call-transcript' in url:
-                            info = self._parse_transcript_url(url)
-                            if info and not any(t.url == info.url for t in transcripts):
-                                transcripts.append(info)
-
-                    logger.info(f"Found {len(transcripts)} transcripts so far...")
-                    time.sleep(0.5)  # Be respectful
-
-                except Exception as e:
-                    logger.warning(f"Failed to parse sitemap {sitemap_url}: {e}")
-                    continue
-
+        
+        # Ensure all required sitemaps are in the database
+        self._ensure_sitemaps_in_db(start_year, end_year, start_month, end_month)
+        
+        # Query transcripts from database
+        transcripts = self._get_transcripts_from_db(None, start_year, end_year, start_month, end_month)
+        
         logger.info(f"Total transcripts found from sitemaps: {len(transcripts)}")
+        return transcripts
         return transcripts
 
     def _parse_transcript_url(self, url: str) -> Optional[TranscriptInfo]:
         """Parse a transcript URL and extract metadata."""
-        # Pattern: company-name-TICKER-qN-YYYY-earnings-call-transcript
-        url_match = re.search(r'/([^/]+)-([a-zA-Z]+)-q([1-4])-(\d{4})-earnings-call-transcript', url, re.IGNORECASE)
+        # Pattern: company-name-TICKER-qN-YYYY-earnings-call-transcript (or truncated: earnings-call-transcrip)
+        # Ticker should be alphanumeric (can include digits) and immediately precedes -qN-YYYY
+        url_match = re.search(r'/([^/]+)-([a-zA-Z0-9]+)-q([1-4])-(\d{4})-earnings', url, re.IGNORECASE)
 
         if url_match:
             company_slug = url_match.group(1)
@@ -798,9 +1009,13 @@ class FoolTranscriptDownloader:
         """
         if use_page_scrape:
             transcripts = self.get_transcript_urls(max_pages=max_pages)
+            # Filter by ticker if specified
+            if ticker:
+                ticker_upper = ticker.upper()
+                transcripts = [t for t in transcripts if t.ticker.upper() == ticker_upper]
+                logger.info(f"Filtered to {len(transcripts)} transcripts for ticker {ticker_upper}")
         else:
             # Parse start/end dates, defaulting to current month
-            from datetime import datetime
             now = datetime.now()
 
             if start:
@@ -813,16 +1028,19 @@ class FoolTranscriptDownloader:
             else:
                 end_year, end_month = start_year, start_month
 
-            transcripts = self.get_transcript_urls_from_sitemap(
-                start_year=start_year, end_year=end_year,
-                start_month=start_month, end_month=end_month
-            )
-
-        # Filter by ticker if specified
-        if ticker:
-            ticker_upper = ticker.upper()
-            transcripts = [t for t in transcripts if t.ticker.upper() == ticker_upper]
-            logger.info(f"Filtered to {len(transcripts)} transcripts for ticker {ticker_upper}")
+            # If ticker is specified, use database query directly for efficiency
+            if ticker:
+                ticker_upper = ticker.upper()
+                # Ensure sitemaps are loaded into database
+                self._ensure_sitemaps_in_db(start_year, end_year, start_month, end_month)
+                # Query directly for the ticker - much faster than filtering
+                transcripts = self._get_transcripts_from_db(ticker=ticker_upper)
+                logger.info(f"Filtered to {len(transcripts)} transcripts for ticker {ticker_upper}")
+            else:
+                transcripts = self.get_transcript_urls_from_sitemap(
+                    start_year=start_year, end_year=end_year,
+                    start_month=start_month, end_month=end_month
+                )
 
         saved_files = []
         skipped_small = []
