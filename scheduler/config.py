@@ -1,15 +1,24 @@
 """
 Scheduler configuration management.
 
-Handles loading, saving, and validating scheduler configuration including
-job definitions, logging settings, and error handling policies.
+Handles loading, saving, and validating scheduler configuration.
+The scheduler is generic and command-based - it simply stores and
+executes shell commands on a schedule.
 """
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Optional, Dict, List, Any
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, field, asdict
+
+# Load .env file if python-dotenv is available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +27,7 @@ logger = logging.getLogger(__name__)
 class ScheduleConfig:
     """Schedule timing configuration."""
     type: str  # 'daily', 'weekly', 'interval', 'cron'
-    time: Optional[str] = None  # HH:MM for daily
+    time: Optional[str] = None  # HH:MM for daily/weekly
     day: Optional[str] = None  # monday, tuesday, etc. for weekly
     hours: Optional[int] = None  # interval in hours
     minutes: Optional[int] = None  # interval in minutes
@@ -27,22 +36,43 @@ class ScheduleConfig:
 
 @dataclass
 class JobConfig:
-    """Individual job configuration."""
+    """
+    Individual job configuration.
+
+    Jobs are command-based - the scheduler doesn't know or care what
+    the command does. It just executes it on the specified schedule.
+    """
     name: str
-    job_type: str  # 'transcripts', 'sec', 'index', 'custom'
+    command: str  # Shell command to execute
     enabled: bool
     schedule: ScheduleConfig
-    options: Dict[str, Any]
+    timeout: int = 3600  # Command timeout in seconds (default: 1 hour)
+    working_dir: Optional[str] = None  # Working directory for command
+    description: Optional[str] = None  # Human-readable description
+
+
+def _get_default_log_file() -> str:
+    """Get default log file path from environment or default."""
+    if os.environ.get('SCHEDULER_LOG_DIR'):
+        return str(Path(os.environ['SCHEDULER_LOG_DIR']).expanduser() / "scheduler.log")
+    elif os.environ.get('EARNINGS_DATA_DIR'):
+        return str(Path(os.environ['EARNINGS_DATA_DIR']).expanduser() / "logs" / "scheduler.log")
+    else:
+        return "~/.earnings_data/logs/scheduler.log"
 
 
 @dataclass
 class LoggingConfig:
     """Logging configuration."""
     level: str = "INFO"
-    file: str = "~/.earnings_data/logs/scheduler.log"
+    file: str = None  # Set dynamically in __post_init__
     rotation: str = "daily"
     retention_days: int = 30
     max_bytes: int = 10 * 1024 * 1024  # 10MB
+
+    def __post_init__(self):
+        if self.file is None:
+            self.file = _get_default_log_file()
 
 
 @dataclass
@@ -60,6 +90,11 @@ class SchedulerConfig:
 
     Loads and manages scheduler configuration from JSON file,
     with support for validation and defaults.
+
+    Configuration path priority:
+    1. Explicit config_path argument
+    2. SCHEDULER_CONFIG_PATH environment variable
+    3. Default: ~/.earnings_data/scheduler_config.json
     """
 
     DEFAULT_CONFIG_PATH = Path.home() / ".earnings_data" / "scheduler_config.json"
@@ -69,9 +104,14 @@ class SchedulerConfig:
         Initialize scheduler configuration.
 
         Args:
-            config_path: Path to configuration file. If None, uses default.
+            config_path: Path to configuration file. If None, uses env var or default.
         """
-        self.config_path = Path(config_path) if config_path else self.DEFAULT_CONFIG_PATH
+        if config_path:
+            self.config_path = Path(config_path)
+        elif os.environ.get('SCHEDULER_CONFIG_PATH'):
+            self.config_path = Path(os.environ['SCHEDULER_CONFIG_PATH']).expanduser()
+        else:
+            self.config_path = self.DEFAULT_CONFIG_PATH
         self.jobs: List[JobConfig] = []
         self.logging: LoggingConfig = LoggingConfig()
         self.error_handling: ErrorHandlingConfig = ErrorHandlingConfig()
@@ -96,10 +136,12 @@ class SchedulerConfig:
 
                 job = JobConfig(
                     name=job_data['name'],
-                    job_type=job_data['job_type'],
+                    command=job_data['command'],
                     enabled=job_data.get('enabled', True),
                     schedule=schedule,
-                    options=job_data.get('options', {})
+                    timeout=job_data.get('timeout', 3600),
+                    working_dir=job_data.get('working_dir'),
+                    description=job_data.get('description')
                 )
                 self.jobs.append(job)
 
@@ -125,10 +167,12 @@ class SchedulerConfig:
             'schedules': [
                 {
                     'name': job.name,
+                    'command': job.command,
                     'enabled': job.enabled,
-                    'job_type': job.job_type,
                     'schedule': asdict(job.schedule),
-                    'options': job.options
+                    'timeout': job.timeout,
+                    'working_dir': job.working_dir,
+                    'description': job.description
                 }
                 for job in self.jobs
             ],
@@ -146,10 +190,10 @@ class SchedulerConfig:
         # Default: Daily transcript download at 2 AM
         default_job = JobConfig(
             name="daily_transcripts",
-            job_type="transcripts",
+            command="earnings-download-transcripts",
             enabled=True,
             schedule=ScheduleConfig(type="daily", time="02:00"),
-            options={}  # Downloads current month
+            description="Download current month transcripts daily"
         )
         self.jobs = [default_job]
 
@@ -218,9 +262,9 @@ class SchedulerConfig:
         errors = []
 
         for job in self.jobs:
-            # Validate job type
-            if job.job_type not in ['transcripts', 'sec', 'index', 'custom']:
-                errors.append(f"Job {job.name}: Invalid job_type '{job.job_type}'")
+            # Validate command is not empty
+            if not job.command or not job.command.strip():
+                errors.append(f"Job {job.name}: 'command' cannot be empty")
 
             # Validate schedule
             schedule = job.schedule
@@ -232,6 +276,10 @@ class SchedulerConfig:
                 errors.append(f"Job {job.name}: 'interval' schedule requires 'hours' or 'minutes'")
             elif schedule.type == 'cron' and not schedule.cron:
                 errors.append(f"Job {job.name}: 'cron' schedule requires 'cron' expression")
+
+            # Validate timeout
+            if job.timeout <= 0:
+                errors.append(f"Job {job.name}: 'timeout' must be positive")
 
         return errors
 

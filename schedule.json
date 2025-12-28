@@ -1,0 +1,28 @@
+{
+  "logging": {
+    "level": "INFO",
+    "file": null
+  },
+  "schedules": [
+    {
+      "name": "daily_transcripts",
+      "command": "python -m fool_transcript_downloader",
+      "schedule": {
+        "type": "daily",
+        "time": "07:00"
+      },
+      "enabled": true,
+      "description": "Download earnings transcripts daily at 7am"
+    },
+    {
+      "name": "daily_sec_filings",
+      "command": "python -m sec_bulk_downloader --ticker-file example_tickers.txt --forms 10-K 10-Q",
+      "schedule": {
+        "type": "daily",
+        "time": "08:00"
+      },
+      "enabled": true,
+      "description": "Download SEC 10-K and 10-Q filings daily at 8am"
+    }
+  ]
+}

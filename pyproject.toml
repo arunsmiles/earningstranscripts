@@ -55,7 +55,7 @@ earnings-query = "client:main"
 earnings-download-transcripts = "fool_transcript_downloader:main"
 earnings-download-sec = "sec_edgar_downloader:main"
 earnings-download-bulk = "sec_bulk_downloader:main"
-earnings-scheduler = "scheduler.cli:main"
+job-scheduler = "scheduler.cli:main"
 
 [tool.setuptools]
 packages = ["scheduler"]

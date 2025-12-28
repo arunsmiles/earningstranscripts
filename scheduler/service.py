@@ -6,9 +6,15 @@ Provides a production-ready scheduling system with:
 - Dynamic job management
 - Concurrent execution
 - Job event logging
+- PID file for status tracking
+
+The scheduler is generic and command-based - it simply executes
+shell commands on a schedule without knowing what they do.
 """
 
+import atexit
 import logging
+import os
 import signal
 import sys
 from pathlib import Path
@@ -28,9 +34,58 @@ from apscheduler.events import (
 )
 
 from scheduler.config import SchedulerConfig, JobConfig, ScheduleConfig
-from scheduler.jobs import JobManager, JobExecutionError
+from scheduler.jobs import CommandExecutor, execute_scheduled_command, JobExecutionError
 
 logger = logging.getLogger(__name__)
+
+
+def _get_pid_file_path() -> Path:
+    """Get the path to the scheduler PID file."""
+    # Check SCHEDULER_PID_FILE first
+    pid_path = os.environ.get('SCHEDULER_PID_FILE')
+    if pid_path:
+        return Path(pid_path)
+    
+    # Fall back to EARNINGS_DATA_DIR
+    data_dir = os.environ.get('EARNINGS_DATA_DIR')
+    if data_dir:
+        return Path(data_dir) / "scheduler.pid"
+    
+    # Final fallback
+    return Path.home() / ".earnings_data" / "scheduler.pid"
+
+
+def _is_process_running(pid: int) -> bool:
+    """Check if a process with the given PID is running."""
+    try:
+        os.kill(pid, 0)  # Signal 0 doesn't kill, just checks
+        return True
+    except OSError:
+        return False
+
+
+def is_scheduler_running() -> tuple[bool, Optional[int]]:
+    """
+    Check if the scheduler is running by reading the PID file.
+    
+    Returns:
+        Tuple of (is_running, pid). If not running, pid is None.
+    """
+    pid_file = _get_pid_file_path()
+    
+    if not pid_file.exists():
+        return False, None
+    
+    try:
+        pid = int(pid_file.read_text().strip())
+        if _is_process_running(pid):
+            return True, pid
+        else:
+            # Stale PID file, clean it up
+            pid_file.unlink()
+            return False, None
+    except (ValueError, OSError):
+        return False, None
 
 
 class SchedulerService:
@@ -38,6 +93,7 @@ class SchedulerService:
     Main scheduler service managing job execution.
 
     Uses APScheduler with SQLite job store for persistence.
+    Executes generic shell commands on a schedule.
     """
 
     def __init__(
@@ -57,11 +113,22 @@ class SchedulerService:
             foreground: If True, use blocking scheduler (for foreground mode)
         """
         self.config = SchedulerConfig(config_path)
-        self.job_manager = JobManager()
+        self.executor = CommandExecutor()
 
-        # Setup job store
+        # Setup job store - check environment variables for path
         if not job_store_path:
-            job_store_path = str(Path.home() / ".earnings_data" / "scheduler_jobs.db")
+            job_store_path = os.environ.get('SCHEDULER_JOB_STORE_PATH')
+            if not job_store_path:
+                # Fall back to EARNINGS_DATA_DIR/scheduler_jobs.db
+                data_dir = os.environ.get('EARNINGS_DATA_DIR')
+                if data_dir:
+                    job_store_path = str(Path(data_dir) / "scheduler_jobs.db")
+                else:
+                    # Final fallback to home directory
+                    job_store_path = str(Path.home() / ".earnings_data" / "scheduler_jobs.db")
+
+        # Store the path for later use
+        self.job_store_path = job_store_path
 
         # Ensure directory exists
         Path(job_store_path).parent.mkdir(parents=True, exist_ok=True)
@@ -170,32 +237,27 @@ class SchedulerService:
         Args:
             job_config: Job configuration object
         """
-        # Create job function
-        job_func = self.job_manager.create_job_function(
-            job_config.job_type,
-            job_config.options
-        )
-
-        # Wrap with retry logic
-        def wrapped_job():
-            return self.job_manager.execute_with_retry(
-                job_func,
-                job_config.name,
-                max_retries=self.config.error_handling.max_retries,
-                retry_delay_minutes=self.config.error_handling.retry_delay_minutes
-            )
+        # Job arguments for the module-level function
+        job_kwargs = {
+            'command': job_config.command,
+            'job_name': job_config.name,
+            'max_retries': self.config.error_handling.max_retries,
+            'retry_delay_minutes': self.config.error_handling.retry_delay_minutes,
+            'timeout': job_config.timeout
+        }
 
         # Add to scheduler based on schedule type
         schedule = job_config.schedule
 
         if schedule.type == 'daily':
             self.scheduler.add_job(
-                wrapped_job,
+                execute_scheduled_command,
                 'cron',
                 hour=int(schedule.time.split(':')[0]),
                 minute=int(schedule.time.split(':')[1]),
                 id=job_config.name,
-                replace_existing=True
+                replace_existing=True,
+                kwargs=job_kwargs
             )
 
         elif schedule.type == 'weekly':
@@ -204,38 +266,41 @@ class SchedulerService:
                 'friday': 4, 'saturday': 5, 'sunday': 6
             }
             self.scheduler.add_job(
-                wrapped_job,
+                execute_scheduled_command,
                 'cron',
                 day_of_week=day_map.get(schedule.day.lower(), 0),
                 hour=int(schedule.time.split(':')[0]),
                 minute=int(schedule.time.split(':')[1]),
                 id=job_config.name,
-                replace_existing=True
+                replace_existing=True,
+                kwargs=job_kwargs
             )
 
         elif schedule.type == 'interval':
-            kwargs = {}
+            interval_kwargs = {}
             if schedule.hours:
-                kwargs['hours'] = schedule.hours
+                interval_kwargs['hours'] = schedule.hours
             if schedule.minutes:
-                kwargs['minutes'] = schedule.minutes
+                interval_kwargs['minutes'] = schedule.minutes
 
             self.scheduler.add_job(
-                wrapped_job,
+                execute_scheduled_command,
                 'interval',
-                **kwargs,
+                **interval_kwargs,
                 id=job_config.name,
-                replace_existing=True
+                replace_existing=True,
+                kwargs=job_kwargs
             )
 
         elif schedule.type == 'cron':
             # Parse cron expression (assumes standard cron format)
             self.scheduler.add_job(
-                wrapped_job,
+                execute_scheduled_command,
                 'cron',
                 **self._parse_cron_expression(schedule.cron),
                 id=job_config.name,
-                replace_existing=True
+                replace_existing=True,
+                kwargs=job_kwargs
             )
 
         logger.info(f"Added job '{job_config.name}' with schedule type '{schedule.type}'")
@@ -264,45 +329,54 @@ class SchedulerService:
 
     def add_one_time_job(
         self,
-        job_type: str,
-        options: Dict[str, Any],
+        command: str,
         run_at: Optional[datetime] = None,
-        job_id: Optional[str] = None
+        job_id: Optional[str] = None,
+        timeout: int = 3600
     ) -> str:
         """
         Add a one-time job to run immediately or at a specific time.
 
         Args:
-            job_type: Type of job to run
-            options: Job options
+            command: Shell command to execute
             run_at: When to run the job (None = immediately)
             job_id: Optional job ID (auto-generated if not provided)
+            timeout: Command timeout in seconds
 
         Returns:
             Job ID
         """
-        job_func = self.job_manager.create_job_function(job_type, options)
-
         if not job_id:
-            job_id = f"onetime_{job_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            job_id = f"onetime_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+        # Job arguments for the module-level function
+        job_kwargs = {
+            'command': command,
+            'job_name': job_id,
+            'max_retries': self.config.error_handling.max_retries,
+            'retry_delay_minutes': self.config.error_handling.retry_delay_minutes,
+            'timeout': timeout
+        }
 
         if run_at:
             self.scheduler.add_job(
-                job_func,
+                execute_scheduled_command,
                 'date',
                 run_date=run_at,
                 id=job_id,
-                replace_existing=True
+                replace_existing=True,
+                kwargs=job_kwargs
             )
             logger.info(f"Scheduled one-time job '{job_id}' for {run_at}")
         else:
             # Run immediately
             self.scheduler.add_job(
-                job_func,
+                execute_scheduled_command,
                 'date',
                 run_date=datetime.now(),
                 id=job_id,
-                replace_existing=True
+                replace_existing=True,
+                kwargs=job_kwargs
             )
             logger.info(f"Scheduled one-time job '{job_id}' to run immediately")
 
@@ -342,6 +416,52 @@ class SchedulerService:
             })
         return jobs
 
+    def get_persisted_jobs(self) -> List[Dict[str, Any]]:
+        """
+        Get list of jobs from the persisted SQLite store.
+        
+        This is useful for checking jobs when the scheduler isn't running
+        in the current process.
+        
+        Returns:
+            List of job information dictionaries
+        """
+        import sqlite3
+        import pickle
+        
+        jobs = []
+        try:
+            conn = sqlite3.connect(self.job_store_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, next_run_time, job_state FROM apscheduler_jobs")
+            
+            for row in cursor.fetchall():
+                job_id = row[0]
+                next_run_ts = row[1]
+                # Convert timestamp to ISO format
+                if next_run_ts:
+                    next_run = datetime.fromtimestamp(next_run_ts).isoformat()
+                else:
+                    next_run = None
+                # job_state is pickled, try to extract trigger info
+                try:
+                    job_state = pickle.loads(row[2])
+                    trigger = str(job_state.get('trigger', 'unknown'))
+                except:
+                    trigger = 'unknown'
+                
+                jobs.append({
+                    'id': job_id,
+                    'next_run': next_run,
+                    'trigger': trigger
+                })
+            
+            conn.close()
+        except Exception as e:
+            logger.debug(f"Failed to read persisted jobs: {e}")
+        
+        return jobs
+
     def get_job_info(self, job_id: str) -> Optional[Dict[str, Any]]:
         """
         Get information about a specific job.
@@ -366,10 +486,20 @@ class SchedulerService:
 
     def start(self):
         """Start the scheduler."""
+        # Check if another scheduler is already running
+        running, pid = is_scheduler_running()
+        if running:
+            logger.warning(f"Scheduler is already running (PID: {pid})")
+            return
+        
         if not self.scheduler.running:
             logger.info("Starting scheduler...")
             self.load_jobs_from_config()
             self.scheduler.start()
+            
+            # Write PID file
+            self._write_pid_file()
+            
             logger.info("Scheduler started successfully")
 
             # Print loaded jobs
@@ -383,6 +513,26 @@ class SchedulerService:
         else:
             logger.warning("Scheduler is already running")
 
+    def _write_pid_file(self):
+        """Write the current process PID to the PID file."""
+        pid_file = _get_pid_file_path()
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text(str(os.getpid()))
+        logger.debug(f"Wrote PID file: {pid_file}")
+        
+        # Register cleanup on exit
+        atexit.register(self._remove_pid_file)
+    
+    def _remove_pid_file(self):
+        """Remove the PID file."""
+        pid_file = _get_pid_file_path()
+        try:
+            if pid_file.exists():
+                pid_file.unlink()
+                logger.debug(f"Removed PID file: {pid_file}")
+        except OSError:
+            pass
+
     def stop(self, wait: bool = True):
         """
         Stop the scheduler.
@@ -393,13 +543,19 @@ class SchedulerService:
         if self.scheduler.running:
             logger.info("Stopping scheduler...")
             self.scheduler.shutdown(wait=wait)
+            self._remove_pid_file()
             logger.info("Scheduler stopped")
         else:
             logger.warning("Scheduler is not running")
 
     def is_running(self) -> bool:
-        """Check if scheduler is running."""
-        return self.scheduler.running
+        """Check if scheduler is running (either this instance or another process)."""
+        # Check this instance first
+        if self.scheduler.running:
+            return True
+        # Check if another process is running
+        running, _ = is_scheduler_running()
+        return running
 
     def print_jobs(self):
         """Print all scheduled jobs in a readable format."""

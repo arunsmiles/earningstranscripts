@@ -3,17 +3,18 @@
     {
       "name": "daily_transcripts",
       "enabled": true,
-      "job_type": "transcripts",
+      "command": "earnings-download-transcripts",
       "schedule": {
         "type": "daily",
         "time": "02:00"
       },
-      "options": {}
+      "timeout": 3600,
+      "description": "Download current month transcripts daily at 2 AM"
     }
   ],
   "logging": {
     "level": "INFO",
-    "file": "~/.earnings_data/logs/scheduler.log",
+    "file": null,
     "rotation": "daily",
     "retention_days": 30
   },

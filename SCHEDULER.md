@@ -1,13 +1,15 @@
-# Earnings Transcript Scheduler
+# Generic Command Scheduler
 
-Automate earnings transcript and SEC filing downloads with a production-ready scheduling system featuring dynamic job queues and persistent storage.
+A production-ready scheduling system for running any shell command on a schedule. Completely decoupled from specific tools - just specify your commands and when to run them.
 
 ## Features
 
+- ✅ **Generic Command Execution** - Run any shell command on a schedule
+- ✅ **Completely Decoupled** - Scheduler knows nothing about your tools
 - ✅ **Dynamic Job Management** - Add, remove, and modify jobs at runtime
 - ✅ **Persistent Job Queue** - Jobs survive restarts (SQLite storage)
 - ✅ **Multiple Schedule Types** - Daily, weekly, interval, and cron schedules
-- ✅ **One-time Jobs** - Queue immediate downloads on-demand
+- ✅ **One-time Jobs** - Queue immediate execution on-demand
 - ✅ **Concurrent Execution** - Run multiple jobs in parallel
 - ✅ **Automatic Retry** - Configurable retry logic with exponential backoff
 - ✅ **Comprehensive Logging** - Track all job executions and errors
@@ -26,7 +28,7 @@ This installs APScheduler and other required dependencies.
 ### 2. Initialize
 
 ```bash
-earnings-scheduler init
+job-scheduler init
 ```
 
 Creates default configuration at `~/.earnings_data/scheduler_config.json`
@@ -35,17 +37,17 @@ Creates default configuration at `~/.earnings_data/scheduler_config.json`
 
 ```bash
 # Background mode (daemon)
-earnings-scheduler start
+job-scheduler start
 
 # Foreground mode (for testing/debugging)
-earnings-scheduler start --foreground
+job-scheduler start --foreground
 ```
 
 ### 4. Check Status
 
 ```bash
-earnings-scheduler status
-earnings-scheduler list
+job-scheduler status
+job-scheduler list
 ```
 
 ## CLI Commands
@@ -54,81 +56,80 @@ earnings-scheduler list
 
 ```bash
 # Start scheduler
-earnings-scheduler start [--foreground] [--workers N]
+job-scheduler start [--foreground] [--workers N]
 
 # Stop scheduler
-earnings-scheduler stop
+job-scheduler stop
 
 # Show status
-earnings-scheduler status
+job-scheduler status
 
 # Initialize configuration
-earnings-scheduler init
+job-scheduler init
 
 # Show current configuration
-earnings-scheduler show-config
+job-scheduler show-config
 ```
 
 ### Job Management
 
 ```bash
 # List all configured jobs
-earnings-scheduler list
+job-scheduler list
 
-# Add a new scheduled job
-earnings-scheduler add <name> --type <type> [schedule] [options]
+# Add a new scheduled job (any shell command)
+job-scheduler add <name> --command "<shell_command>" [schedule options]
 
 # Remove a job
-earnings-scheduler remove <job_name>
+job-scheduler remove <job_name>
 
 # Enable/disable a job
-earnings-scheduler enable <job_name>
-earnings-scheduler disable <job_name>
+job-scheduler enable <job_name>
+job-scheduler disable <job_name>
 
-# Run a one-time job
-earnings-scheduler run-once --type <type> [options]
+# Run a one-time command
+job-scheduler run-once --command "<shell_command>"
 ```
 
 ## Schedule Types
 
 ### Daily Schedule
 
-Run a job every day at a specific time:
+Run a command every day at a specific time:
 
 ```bash
-earnings-scheduler add daily_transcripts \
-  --type transcripts \
+job-scheduler add daily_transcripts \
+  --command "earnings-download-transcripts" \
   --daily \
   --time "02:00"
 ```
 
 ### Weekly Schedule
 
-Run a job on a specific day of the week:
+Run a command on a specific day of the week:
 
 ```bash
-earnings-scheduler add weekly_sync \
-  --type transcripts \
+job-scheduler add weekly_sync \
+  --command "earnings-download-transcripts --all" \
   --weekly \
-  --day monday \
-  --time "03:00" \
-  --all
+  --day sunday \
+  --time "03:00"
 ```
 
 ### Interval Schedule
 
-Run a job at regular intervals:
+Run a command at regular intervals:
 
 ```bash
 # Every 6 hours
-earnings-scheduler add monitor_filings \
-  --type sec \
+job-scheduler add monitor_filings \
+  --command "earnings-download-sec --ticker AAPL MSFT" \
   --interval \
   --hours 6
 
 # Every 30 minutes
-earnings-scheduler add frequent_check \
-  --type transcripts \
+job-scheduler add frequent_check \
+  --command "python /path/to/check_script.py" \
   --interval \
   --minutes 30
 ```
@@ -139,117 +140,100 @@ Use cron expressions for complex schedules:
 
 ```bash
 # First day of every month at 5 AM
-earnings-scheduler add monthly_reindex \
-  --type index \
+job-scheduler add monthly_reindex \
+  --command "earnings-index --rebuild" \
   --cron "0 5 1 * *"
 
 # Every weekday at 9 AM
-earnings-scheduler add weekday_download \
-  --type transcripts \
+job-scheduler add weekday_download \
+  --command "earnings-download-transcripts" \
   --cron "0 9 * * 1-5"
 ```
 
 **Cron format:** `minute hour day month day_of_week`
 
-## Job Types
+## Examples
 
-### 1. Transcripts (`transcripts`)
-
-Download earnings call transcripts from Motley Fool.
-
-**Options:**
-- `--ticker SYMBOL` - Download specific ticker
-- `--all` - Download all historical transcripts
-- `--from YYYY-MM` - Start date
-- `--to YYYY-MM` - End date
-
-**Examples:**
+### Earnings Transcript Downloads
 
 ```bash
-# Daily download of current month
-earnings-scheduler add daily_transcripts \
-  --type transcripts \
+# Daily download of current month transcripts
+job-scheduler add daily_transcripts \
+  --command "earnings-download-transcripts" \
   --daily --time "02:00"
 
 # Weekly full historical sync
-earnings-scheduler add weekly_all \
-  --type transcripts \
-  --weekly --day sunday --time "03:00" \
-  --all
+job-scheduler add weekly_all \
+  --command "earnings-download-transcripts --all --delay 2.0" \
+  --weekly --day sunday --time "03:00"
 
 # Specific ticker every 4 hours
-earnings-scheduler add aapl_monitor \
-  --type transcripts \
-  --interval --hours 4 \
-  --ticker AAPL
+job-scheduler add aapl_monitor \
+  --command "earnings-download-transcripts --ticker AAPL" \
+  --interval --hours 4
 ```
 
-### 2. SEC Filings (`sec`)
-
-Download SEC filings (10-K, 10-Q).
-
-**Options:**
-- `--ticker SYMBOL [SYMBOL...]` - One or more tickers (required)
-- `--forms FORM [FORM...]` - Form types (default: 10-K 10-Q)
-- `--all` - Download all historical filings
-- `--from YYYY-MM-DD` - Start date
-- `--to YYYY-MM-DD` - End date
-
-**Examples:**
+### SEC Filings
 
 ```bash
 # Monitor major tech companies every 6 hours
-earnings-scheduler add tech_sec_monitor \
-  --type sec \
-  --interval --hours 6 \
-  --ticker AAPL MSFT GOOGL AMZN \
-  --forms 10-K 10-Q
+job-scheduler add tech_sec_monitor \
+  --command "earnings-download-sec --ticker AAPL MSFT GOOGL AMZN --forms 10-K 10-Q" \
+  --interval --hours 6
 ```
 
-**Note:** SEC job type requires tickers to be specified in the configuration file.
-
-### 3. Indexing (`index`)
-
-Rebuild or update the SQLite metadata index.
-
-**Options:**
-- `--rebuild` - Full rebuild (slower but thorough)
-
-**Examples:**
+### Index Maintenance
 
 ```bash
 # Daily index update after transcripts download
-earnings-scheduler add daily_index \
-  --type index \
+job-scheduler add daily_index \
+  --command "earnings-index --update" \
   --daily --time "04:00"
 
 # Monthly full rebuild
-earnings-scheduler add monthly_rebuild \
-  --type index \
-  --cron "0 5 1 * *" \
-  --rebuild
+job-scheduler add monthly_rebuild \
+  --command "earnings-index --rebuild" \
+  --cron "0 5 1 * *"
+```
+
+### Custom Scripts
+
+Run any script or command - the scheduler doesn't care what it does:
+
+```bash
+# Run a Python script
+job-scheduler add custom_analysis \
+  --command "python /path/to/analyze.py --output /tmp/report.csv" \
+  --daily --time "06:00"
+
+# Run a shell script
+job-scheduler add backup_data \
+  --command "/path/to/backup.sh" \
+  --weekly --day saturday --time "01:00"
+
+# Chain multiple commands
+job-scheduler add pipeline \
+  --command "earnings-download-transcripts && earnings-index --update" \
+  --daily --time "02:30"
 ```
 
 ## One-Time Jobs (Dynamic Queue)
 
-Queue jobs to run immediately or at a specific time without adding to the schedule:
+Run commands immediately or at a specific time without adding to the schedule:
 
 ```bash
 # Run immediately
-earnings-scheduler run-once \
-  --type transcripts \
-  --ticker NVDA
+job-scheduler run-once \
+  --command "earnings-download-transcripts --ticker NVDA"
 
 # Run at specific time
-earnings-scheduler run-once \
-  --type transcripts \
-  --all \
+job-scheduler run-once \
+  --command "earnings-download-transcripts --all" \
   --at "2024-12-27 15:00"
 
-# Download specific date range
-earnings-scheduler run-once \
-  --type transcripts \
-  --from 2024-01 --to 2024-06
+# Run any command
+job-scheduler run-once \
+  --command "python /path/to/my_script.py --arg value"
 ```
 
 One-time jobs are automatically removed after execution.
@@ -266,12 +250,13 @@ Configuration file: `~/.earnings_data/scheduler_config.json`
     {
       "name": "daily_transcripts",
       "enabled": true,
-      "job_type": "transcripts",
+      "command": "earnings-download-transcripts",
       "schedule": {
         "type": "daily",
         "time": "02:00"
       },
-      "options": {}
+      "timeout": 3600,
+      "description": "Download current month transcripts daily"
     }
   ],
   "logging": {
@@ -292,10 +277,11 @@ Configuration file: `~/.earnings_data/scheduler_config.json`
 ### Advanced Example
 
 See `scheduler/examples/advanced_schedule.json` for a comprehensive example with:
-- Daily current month downloads
+- Daily transcript downloads
 - Weekly historical sync
 - Interval-based SEC filing monitoring
 - Index rebuilding
+- Custom script execution
 
 ## Logging
 
@@ -358,22 +344,19 @@ Jobs are stored in a persistent SQLite database:
 Download only new transcripts every day:
 
 ```bash
-earnings-scheduler add daily_new \
-  --type transcripts \
+job-scheduler add daily_new \
+  --command "earnings-download-transcripts" \
   --daily --time "02:00"
 ```
-
-Configuration downloads current month by default (new transcripts only).
 
 ### 2. Weekly Full Sync
 
 Comprehensive historical sync once per week:
 
 ```bash
-earnings-scheduler add weekly_full_sync \
-  --type transcripts \
-  --weekly --day sunday --time "03:00" \
-  --all
+job-scheduler add weekly_full_sync \
+  --command "earnings-download-transcripts --all" \
+  --weekly --day sunday --time "03:00"
 ```
 
 ### 3. Continuous Monitoring
@@ -383,10 +366,9 @@ Monitor specific tickers throughout the day:
 ```bash
 # Monitor FAANG stocks every 4 hours
 for ticker in AAPL MSFT GOOGL AMZN; do
-  earnings-scheduler add "${ticker}_monitor" \
-    --type transcripts \
-    --interval --hours 4 \
-    --ticker $ticker
+  job-scheduler add "${ticker}_monitor" \
+    --command "earnings-download-transcripts --ticker $ticker" \
+    --interval --hours 4
 done
 ```
 
@@ -395,16 +377,9 @@ done
 Check for new SEC filings periodically:
 
 ```bash
-# Configure in scheduler_config.json
-{
-  "name": "sec_monitor",
-  "job_type": "sec",
-  "schedule": {"type": "interval", "hours": 6},
-  "options": {
-    "tickers": ["AAPL", "MSFT", "GOOGL", "AMZN"],
-    "forms": ["10-K", "10-Q"]
-  }
-}
+job-scheduler add sec_monitor \
+  --command "earnings-download-sec --ticker AAPL MSFT GOOGL AMZN --forms 10-K 10-Q" \
+  --interval --hours 6
 ```
 
 ### 5. Index Maintenance
@@ -413,21 +388,32 @@ Keep index updated:
 
 ```bash
 # Daily update
-earnings-scheduler add daily_index \
-  --type index \
+job-scheduler add daily_index \
+  --command "earnings-index --update" \
   --daily --time "04:00"
 
 # Monthly full rebuild
-earnings-scheduler add monthly_rebuild \
-  --type index \
+job-scheduler add monthly_rebuild \
+  --command "earnings-index --rebuild" \
   --cron "0 5 1 * *"
+```
+
+### 6. Custom Pipelines
+
+Chain multiple commands together:
+
+```bash
+# Download transcripts, then update index
+job-scheduler add daily_pipeline \
+  --command "earnings-download-transcripts && earnings-index --update" \
+  --daily --time "02:00"
 ```
 
 ## Deployment
 
 ### Systemd Service (Linux)
 
-Create `/etc/systemd/system/earnings-scheduler.service`:
+Create `/etc/systemd/system/job-scheduler.service`:
 
 ```ini
 [Unit]
@@ -437,7 +423,7 @@ After=network.target
 [Service]
 Type=simple
 User=your_username
-ExecStart=/path/to/venv/bin/earnings-scheduler start --foreground
+ExecStart=/path/to/venv/bin/job-scheduler start --foreground
 Restart=on-failure
 RestartSec=30
 
@@ -448,9 +434,9 @@ WantedBy=multi-user.target
 Enable and start:
 
 ```bash
-sudo systemctl enable earnings-scheduler
-sudo systemctl start earnings-scheduler
-sudo systemctl status earnings-scheduler
+sudo systemctl enable job-scheduler
+sudo systemctl start job-scheduler
+sudo systemctl status job-scheduler
 ```
 
 ### Docker
@@ -464,19 +450,19 @@ COPY . /app
 RUN pip install -e .
 
 # Initialize configuration
-RUN earnings-scheduler init
+RUN job-scheduler init
 
-CMD ["earnings-scheduler", "start", "--foreground"]
+CMD ["job-scheduler", "start", "--foreground"]
 ```
 
 Build and run:
 
 ```bash
-docker build -t earnings-scheduler .
+docker build -t job-scheduler .
 docker run -d \
-  --name earnings-scheduler \
+  --name job-scheduler \
   -v ~/.earnings_data:/root/.earnings_data \
-  earnings-scheduler
+  job-scheduler
 ```
 
 ### Cron (Legacy Alternative)
@@ -499,7 +485,7 @@ crontab -e
 
 ```bash
 # Check configuration
-earnings-scheduler show-config
+job-scheduler show-config
 
 # Validate configuration
 python -c "from scheduler.config import SchedulerConfig; c = SchedulerConfig(); print(c.validate())"
@@ -512,10 +498,10 @@ tail -50 ~/.earnings_data/logs/scheduler.log
 
 ```bash
 # Check scheduler status
-earnings-scheduler status
+job-scheduler status
 
 # List all jobs
-earnings-scheduler list
+job-scheduler list
 
 # Verify job is enabled
 # Edit ~/.earnings_data/scheduler_config.json
@@ -529,7 +515,7 @@ earnings-scheduler list
 grep ERROR ~/.earnings_data/logs/scheduler.log | tail -20
 
 # Run job manually to test
-earnings-scheduler run-once --type transcripts --ticker AAPL
+job-scheduler run-once --command "earnings-download-transcripts --ticker AAPL"
 
 # Increase retry attempts
 # Edit scheduler_config.json: "max_retries": 5
@@ -543,7 +529,7 @@ sqlite3 ~/.earnings_data/scheduler_jobs.db "SELECT * FROM apscheduler_jobs;"
 
 # Reset job store (WARNING: removes all scheduled jobs)
 rm ~/.earnings_data/scheduler_jobs.db
-earnings-scheduler start
+job-scheduler start
 ```
 
 ## Architecture
@@ -552,7 +538,7 @@ earnings-scheduler start
 scheduler/
 ├── __init__.py       # Package initialization
 ├── config.py         # Configuration management
-├── jobs.py           # Job definitions and execution
+├── jobs.py           # Generic command execution
 ├── service.py        # Core scheduler service (APScheduler)
 ├── cli.py            # Command-line interface
 └── examples/         # Example configurations
@@ -563,7 +549,7 @@ scheduler/
 **Key Components:**
 
 1. **SchedulerService** - Manages APScheduler instance and job lifecycle
-2. **JobManager** - Executes different job types with retry logic
+2. **CommandExecutor** - Executes shell commands with retry logic
 3. **SchedulerConfig** - Handles configuration loading/saving
 4. **CLI** - Provides comprehensive command-line interface
 
@@ -579,10 +565,10 @@ service = SchedulerService()
 # Add a job programmatically
 job = JobConfig(
     name="my_custom_job",
-    job_type="transcripts",
+    command="earnings-download-transcripts --ticker TSLA",
     enabled=True,
     schedule=ScheduleConfig(type="daily", time="10:00"),
-    options={"ticker": "TSLA"}
+    description="Download TSLA transcripts daily"
 )
 
 config = SchedulerConfig()
@@ -594,8 +580,7 @@ service.start()
 
 # Queue one-time job
 service.add_one_time_job(
-    job_type="transcripts",
-    options={"ticker": "NVDA"}
+    command="earnings-download-transcripts --ticker NVDA"
 )
 
 # Get job status
@@ -639,12 +624,19 @@ A: Missed jobs are coalesced and run once when the scheduler starts.
 A: Not currently. Restart the scheduler after modifying `scheduler_config.json`.
 
 **Q: How do I download for all companies every day?**
-A: Use `--all` option in a daily schedule:
+A: Use `--all` option in your command:
 ```bash
-earnings-scheduler add daily_all \
-  --type transcripts \
-  --daily --time "02:00" \
-  --all
+job-scheduler add daily_all \
+  --command "earnings-download-transcripts --all" \
+  --daily --time "02:00"
+```
+
+**Q: Can I run any shell command?**
+A: Yes! The scheduler is completely generic. Run Python scripts, shell scripts, or any executable:
+```bash
+job-scheduler add my_job \
+  --command "python /path/to/script.py --arg value" \
+  --daily --time "10:00"
 ```
 
 **Q: Can I get email notifications?**

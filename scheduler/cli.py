@@ -6,20 +6,46 @@ Provides comprehensive CLI commands for:
 - Adding/removing/modifying jobs
 - Viewing job status and logs
 - Managing configuration
+
+The scheduler is generic and command-based - it simply executes
+shell commands on a schedule without knowing what they do.
 """
 
 import argparse
 import sys
+import os
 import logging
 from datetime import datetime
 from pathlib import Path
 import time
 import json
 
-from scheduler.service import SchedulerService
+# Load .env file if python-dotenv is available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+from scheduler.service import SchedulerService, is_scheduler_running
 from scheduler.config import SchedulerConfig, JobConfig, ScheduleConfig
 
 logger = logging.getLogger(__name__)
+
+
+def get_log_dir() -> Path:
+    """Get the log directory from environment or default."""
+    if os.environ.get('SCHEDULER_LOG_DIR'):
+        return Path(os.environ['SCHEDULER_LOG_DIR']).expanduser()
+    elif os.environ.get('EARNINGS_DATA_DIR'):
+        return Path(os.environ['EARNINGS_DATA_DIR']).expanduser() / "logs"
+    else:
+        return Path.home() / ".earnings_data" / "logs"
+
+
+def get_log_file() -> Path:
+    """Get the scheduler log file path."""
+    return get_log_dir() / "scheduler.log"
 
 
 def setup_logging(log_file: str = None, verbose: bool = False):
@@ -57,11 +83,11 @@ def setup_logging(log_file: str = None, verbose: bool = False):
 def cmd_start(args):
     """Start the scheduler."""
     setup_logging(
-        log_file=args.log_file or str(Path.home() / ".earnings_data/logs/scheduler.log"),
+        log_file=args.log_file or str(get_log_file()),
         verbose=args.verbose
     )
 
-    logger.info("Starting earnings transcript scheduler...")
+    logger.info("Starting job scheduler...")
 
     try:
         service = SchedulerService(
@@ -83,7 +109,7 @@ def cmd_start(args):
                 service.stop()
         else:
             logger.info("Scheduler is running in the background")
-            logger.info("Use 'earnings-scheduler stop' to stop it")
+            logger.info("Use 'job-scheduler stop' to stop it")
             logger.info(f"Logs: {args.log_file}")
 
             # Write PID file
@@ -145,13 +171,18 @@ def cmd_status(args):
     setup_logging(verbose=args.verbose)
 
     try:
-        service = SchedulerService(config_path=args.config)
-
+        # Check if scheduler is running via PID file
+        running, pid = is_scheduler_running()
+        
         print("\n=== Scheduler Status ===\n")
-        print(f"Running: {service.is_running()}")
+        print(f"Running: {running}")
+        if running and pid:
+            print(f"PID: {pid}")
 
-        jobs = service.get_jobs()
-        print(f"Jobs: {len(jobs)}")
+        # Load config to show jobs from persisted store
+        service = SchedulerService(config_path=args.config)
+        jobs = service.get_persisted_jobs()
+        print(f"Jobs in store: {len(jobs)}")
 
         if jobs:
             print("\nScheduled Jobs:")
@@ -177,7 +208,7 @@ def cmd_list(args):
         for job in config.jobs:
             status = "✓" if job.enabled else "✗"
             print(f"{status} {job.name}")
-            print(f"    Type: {job.job_type}")
+            print(f"    Command: {job.command}")
             print(f"    Schedule: {job.schedule.type}", end="")
 
             if job.schedule.type == 'daily':
@@ -194,8 +225,10 @@ def cmd_list(args):
             else:
                 print()
 
-            if job.options:
-                print(f"    Options: {job.options}")
+            if job.description:
+                print(f"    Description: {job.description}")
+            if job.timeout != 3600:
+                print(f"    Timeout: {job.timeout}s")
             print()
 
     except Exception as e:
@@ -227,32 +260,21 @@ def cmd_add(args):
             logger.error("Must specify schedule type: --daily, --weekly, --interval, or --cron")
             sys.exit(1)
 
-        # Build options
-        options = {}
-        if args.ticker:
-            options['ticker'] = args.ticker
-        if args.all:
-            options['all'] = True
-        if args.from_date:
-            options['from'] = args.from_date
-        if args.to_date:
-            options['to'] = args.to_date
-        if args.forms:
-            options['forms'] = args.forms
-
         # Create job config
         job = JobConfig(
             name=args.name,
-            job_type=args.type,
+            command=args.command,
             enabled=True,
             schedule=schedule,
-            options=options
+            timeout=args.timeout,
+            description=args.description
         )
 
         config.add_job(job)
         config.save()
 
         logger.info(f"Added job '{args.name}'")
+        logger.info(f"Command: {args.command}")
         logger.info("Restart scheduler for changes to take effect")
 
     except Exception as e:
@@ -319,38 +341,115 @@ def cmd_run_once(args):
     setup_logging(verbose=args.verbose)
 
     try:
-        service = SchedulerService(config_path=args.config)
-
-        # Build options
-        options = {}
-        if args.ticker:
-            options['ticker'] = args.ticker
-        if args.all:
-            options['all'] = True
-        if args.from_date:
-            options['from'] = args.from_date
-        if args.to_date:
-            options['to'] = args.to_date
-
-        # Parse run time
+        # Parse run time for scheduled execution
         run_at = None
         if args.at:
             run_at = datetime.strptime(args.at, '%Y-%m-%d %H:%M')
 
-        job_id = service.add_one_time_job(
-            job_type=args.type,
-            options=options,
-            run_at=run_at
-        )
-
-        logger.info(f"Queued one-time job '{job_id}'")
-        if run_at:
-            logger.info(f"Scheduled to run at: {run_at}")
+        # If scheduling for later or background flag, use the scheduler
+        if run_at or args.background:
+            service = SchedulerService(config_path=args.config)
+            job_id = service.add_one_time_job(
+                command=args.command,
+                run_at=run_at,
+                timeout=args.timeout
+            )
+            logger.info(f"Queued one-time job '{job_id}'")
+            logger.info(f"Command: {args.command}")
+            if run_at:
+                logger.info(f"Scheduled to run at: {run_at}")
+                logger.info("Note: The scheduler service must be running for scheduled jobs to execute.")
+                logger.info("Start it with: job-scheduler start --foreground")
+            else:
+                logger.info("Queued for background execution")
+                logger.info("Note: The scheduler service must be running for background jobs to execute.")
         else:
-            logger.info("Will run immediately")
+            # Run immediately in the foreground (default behavior)
+            from scheduler.jobs import CommandExecutor
+
+            job_id = f"onetime_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            logger.info(f"Running job '{job_id}' now...")
+            logger.info(f"Command: {args.command}")
+            print()  # Blank line before command output
+
+            executor = CommandExecutor()
+
+            start_time = datetime.now()
+            try:
+                result = executor.execute_command(
+                    args.command,
+                    timeout=args.timeout,
+                    stream_output=True  # Stream output in real-time
+                )
+                end_time = datetime.now()
+                duration = (end_time - start_time).total_seconds()
+                print()  # Blank line after command output
+                logger.info(f"Job '{job_id}' completed successfully in {duration:.1f}s")
+            except Exception as job_error:
+                end_time = datetime.now()
+                duration = (end_time - start_time).total_seconds()
+                logger.error(f"Job '{job_id}' failed after {duration:.1f}s: {job_error}")
+                sys.exit(1)
 
     except Exception as e:
-        logger.error(f"Failed to queue job: {e}")
+        logger.error(f"Failed to run job: {e}", exc_info=args.verbose)
+        sys.exit(1)
+
+
+def cmd_logs(args):
+    """View scheduler logs."""
+    log_file = get_log_file()
+    
+    if not log_file.exists():
+        print(f"No log file found at: {log_file}")
+        print("Logs are created when running jobs or starting the scheduler.")
+        return
+    
+    try:
+        # Read log file
+        with open(log_file, 'r') as f:
+            lines = f.readlines()
+        
+        # Filter by job if specified
+        if args.job:
+            lines = [l for l in lines if args.job in l]
+        
+        # Filter by level if specified
+        if args.level:
+            level_upper = args.level.upper()
+            lines = [l for l in lines if f'[{level_upper}]' in l]
+        
+        # Get last N lines (unless --all is specified)
+        if not args.show_all and args.tail:
+            lines = lines[-args.tail:]
+        
+        if not lines:
+            print("No matching log entries found.")
+            if args.job:
+                print(f"  Filter: job contains '{args.job}'")
+            if args.level:
+                print(f"  Filter: level = {args.level.upper()}")
+            return
+        
+        # Print logs
+        for line in lines:
+            # Color-code by level
+            if args.color:
+                if '[ERROR]' in line:
+                    print(f"\033[91m{line.rstrip()}\033[0m")
+                elif '[WARNING]' in line:
+                    print(f"\033[93m{line.rstrip()}\033[0m")
+                elif '[INFO]' in line:
+                    print(f"\033[92m{line.rstrip()}\033[0m")
+                else:
+                    print(line.rstrip())
+            else:
+                print(line.rstrip())
+        
+        print(f"\n--- Showing {len(lines)} log entries from {log_file} ---")
+        
+    except Exception as e:
+        print(f"Error reading logs: {e}")
         sys.exit(1)
 
 
@@ -399,7 +498,7 @@ def main():
     import os  # Import here to avoid issues with module-level code
 
     parser = argparse.ArgumentParser(
-        description="Earnings Transcript Scheduler - Automate downloads with dynamic job queues",
+        description="Job Scheduler - Run any command on a schedule with dynamic job queues",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
 
@@ -452,10 +551,9 @@ def main():
     add_parser = subparsers.add_parser('add', help='Add a new scheduled job')
     add_parser.add_argument('name', help='Job name')
     add_parser.add_argument(
-        '--type',
-        choices=['transcripts', 'sec', 'index'],
+        '--command', '-c',
         required=True,
-        help='Job type'
+        help='Shell command to execute (e.g., "earnings-download-transcripts --all")'
     )
 
     # Schedule type (mutually exclusive)
@@ -472,11 +570,9 @@ def main():
     add_parser.add_argument('--minutes', type=int, help='Interval in minutes')
 
     # Job options
-    add_parser.add_argument('--ticker', type=str, help='Specific ticker symbol')
-    add_parser.add_argument('--all', action='store_true', help='Download all historical data')
-    add_parser.add_argument('--from', dest='from_date', type=str, help='Start date (YYYY-MM-DD)')
-    add_parser.add_argument('--to', dest='to_date', type=str, help='End date (YYYY-MM-DD)')
-    add_parser.add_argument('--forms', nargs='+', help='SEC form types (e.g., 10-K 10-Q)')
+    add_parser.add_argument('--timeout', type=int, default=3600,
+                            help='Command timeout in seconds (default: 3600)')
+    add_parser.add_argument('--description', type=str, help='Human-readable description')
     add_parser.set_defaults(func=cmd_add)
 
     # Remove command
@@ -495,19 +591,29 @@ def main():
     disable_parser.set_defaults(func=cmd_disable)
 
     # Run-once command
-    run_once_parser = subparsers.add_parser('run-once', help='Queue a one-time job')
+    run_once_parser = subparsers.add_parser('run-once', help='Run a one-time command immediately')
     run_once_parser.add_argument(
-        '--type',
-        choices=['transcripts', 'sec', 'index'],
+        '--command', '-c',
         required=True,
-        help='Job type'
+        help='Shell command to execute'
     )
-    run_once_parser.add_argument('--ticker', type=str, help='Specific ticker symbol')
-    run_once_parser.add_argument('--all', action='store_true', help='Download all data')
-    run_once_parser.add_argument('--from', dest='from_date', type=str, help='Start date')
-    run_once_parser.add_argument('--to', dest='to_date', type=str, help='End date')
-    run_once_parser.add_argument('--at', type=str, help='Run at specific time (YYYY-MM-DD HH:MM)')
+    run_once_parser.add_argument('--timeout', type=int, default=3600,
+                                  help='Command timeout in seconds (default: 3600)')
+    run_once_parser.add_argument('--at', type=str, help='Schedule to run at specific time (YYYY-MM-DD HH:MM)')
+    run_once_parser.add_argument('--background', action='store_true',
+                                  help='Queue for background execution (requires scheduler running)')
     run_once_parser.set_defaults(func=cmd_run_once)
+
+    # Logs command
+    logs_parser = subparsers.add_parser('logs', help='View scheduler logs')
+    logs_parser.add_argument('--job', type=str, help='Filter logs by job name/ID')
+    logs_parser.add_argument('--level', type=str, choices=['info', 'warning', 'error', 'debug'],
+                             help='Filter by log level')
+    logs_parser.add_argument('--tail', '-n', type=int, default=50, help='Show last N lines (default: 50)')
+    logs_parser.add_argument('--all', '-a', dest='show_all', action='store_true', 
+                             help='Show all logs (not just last N)')
+    logs_parser.add_argument('--color', '-c', action='store_true', help='Colorize output')
+    logs_parser.set_defaults(func=cmd_logs)
 
     # Init command
     init_parser = subparsers.add_parser('init', help='Initialize scheduler configuration')

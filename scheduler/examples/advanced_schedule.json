@@ -1,79 +1,77 @@
 {
   "schedules": [
     {
-      "name": "daily_all_transcripts",
+      "name": "daily_transcripts",
       "enabled": true,
-      "job_type": "transcripts",
+      "command": "earnings-download-transcripts",
       "schedule": {
         "type": "daily",
         "time": "02:00"
       },
-      "options": {
-        "all": false,
-        "delay": 1.0
-      },
-      "comment": "Downloads current month transcripts daily at 2 AM"
+      "timeout": 3600,
+      "description": "Download current month transcripts daily at 2 AM"
     },
     {
-      "name": "weekly_historical_sync",
+      "name": "weekly_full_sync",
       "enabled": true,
-      "job_type": "transcripts",
+      "command": "earnings-download-transcripts --all --delay 2.0",
       "schedule": {
         "type": "weekly",
         "day": "sunday",
         "time": "03:00"
       },
-      "options": {
-        "all": true,
-        "delay": 2.0
-      },
-      "comment": "Full historical sync every Sunday at 3 AM"
+      "timeout": 14400,
+      "description": "Full historical sync every Sunday at 3 AM (4 hour timeout)"
     },
     {
       "name": "sec_filings_monitor",
       "enabled": true,
-      "job_type": "sec",
+      "command": "earnings-download-sec --ticker AAPL MSFT GOOGL AMZN --forms 10-K 10-Q",
       "schedule": {
         "type": "interval",
         "hours": 6
       },
-      "options": {
-        "tickers": ["AAPL", "MSFT", "GOOGL", "AMZN"],
-        "forms": ["10-K", "10-Q"],
-        "all": false
-      },
-      "comment": "Check for new SEC filings every 6 hours for major tickers"
+      "timeout": 3600,
+      "description": "Check for new SEC filings every 6 hours for major tickers"
     },
     {
-      "name": "rebuild_index",
+      "name": "daily_index_update",
       "enabled": true,
-      "job_type": "index",
+      "command": "earnings-index --update",
       "schedule": {
         "type": "daily",
         "time": "04:00"
       },
-      "options": {
-        "rebuild": false
-      },
-      "comment": "Update index daily after transcript downloads"
+      "timeout": 1800,
+      "description": "Update index daily after transcript downloads"
     },
     {
       "name": "monthly_full_reindex",
       "enabled": false,
-      "job_type": "index",
+      "command": "earnings-index --rebuild",
       "schedule": {
         "type": "cron",
         "cron": "0 5 1 * *"
       },
-      "options": {
-        "rebuild": true
+      "timeout": 7200,
+      "description": "Full index rebuild on 1st of each month at 5 AM (currently disabled)"
+    },
+    {
+      "name": "custom_backup_script",
+      "enabled": false,
+      "command": "/path/to/backup_script.sh",
+      "schedule": {
+        "type": "daily",
+        "time": "05:00"
       },
-      "comment": "Full index rebuild on 1st of each month at 5 AM (currently disabled)"
+      "timeout": 1800,
+      "working_dir": "/home/user/backups",
+      "description": "Run custom backup script daily"
     }
   ],
   "logging": {
     "level": "INFO",
-    "file": "~/.earnings_data/logs/scheduler.log",
+    "file": null,
     "rotation": "daily",
     "retention_days": 30,
     "max_bytes": 10485760

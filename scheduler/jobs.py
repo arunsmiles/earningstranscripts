@@ -1,15 +1,16 @@
 """
-Job definitions and execution management.
+Generic command execution for scheduled jobs.
 
-Defines different job types (transcripts, SEC filings, indexing) and
-handles their execution with error handling and logging.
+Executes shell commands with error handling, timeout, and logging.
+The scheduler is completely decoupled from specific tools - it simply
+runs whatever command you specify.
 """
 
 import logging
+import subprocess
 import time
 from datetime import datetime
-from typing import Dict, Any, Callable
-from pathlib import Path
+from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -19,280 +20,248 @@ class JobExecutionError(Exception):
     pass
 
 
-class JobManager:
+class CommandExecutor:
     """
-    Manages job execution for different job types.
+    Executes shell commands with retry logic and statistics tracking.
 
-    Supports:
-    - Transcript downloads
-    - SEC filing downloads
-    - Indexing operations
-    - Custom scripts
+    This is a generic executor that can run any command - it knows nothing
+    about transcripts, SEC filings, or any specific tool.
     """
 
-    def __init__(self, config=None):
-        """
-        Initialize job manager.
-
-        Args:
-            config: Optional Config instance for data directory
-        """
-        self.config = config
+    def __init__(self):
+        """Initialize command executor."""
         self.job_stats = {}  # Track job execution statistics
 
-    def create_job_function(self, job_type: str, options: Dict[str, Any]) -> Callable:
+    def execute_command(
+        self,
+        command: str,
+        timeout: Optional[int] = 3600,
+        working_dir: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+        stream_output: bool = False,
+        job_name: Optional[str] = None,
+        run_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
-        Create executable job function based on job type.
+        Execute a shell command.
 
         Args:
-            job_type: Type of job ('transcripts', 'sec', 'index', 'custom')
-            options: Job-specific options
+            command: Shell command to execute
+            timeout: Timeout in seconds (default: 1 hour)
+            working_dir: Working directory for command execution
+            env: Additional environment variables
+            stream_output: If True, stream output to console in real-time
+            job_name: Name of the job (for logging)
+            run_id: Unique run identifier (for logging)
 
         Returns:
-            Callable job function
+            Dict with stdout, stderr, returncode
 
         Raises:
-            ValueError: If job_type is unknown
+            JobExecutionError: If command fails (non-zero exit code)
         """
-        job_functions = {
-            'transcripts': self._create_transcript_job,
-            'sec': self._create_sec_job,
-            'index': self._create_index_job,
-            'custom': self._create_custom_job
-        }
+        # Create log prefix with job context
+        log_prefix = ""
+        if job_name and run_id:
+            log_prefix = f"[{job_name}:{run_id}] "
+        elif job_name:
+            log_prefix = f"[{job_name}] "
+        
+        logger.info(f"{log_prefix}Executing command: {command}")
 
-        if job_type not in job_functions:
-            raise ValueError(f"Unknown job type: {job_type}")
-
-        return job_functions[job_type](options)
-
-    def _create_transcript_job(self, options: Dict[str, Any]) -> Callable:
-        """Create transcript download job."""
-        def job():
-            logger.info("Starting transcript download job")
-            logger.debug(f"Options: {options}")
-
-            try:
-                # Import here to avoid circular dependencies
-                from fool_transcript_downloader import FoolTranscriptDownloader
-                from config import get_config
-
-                # Get config
-                config = self.config or get_config()
-
-                # Create downloader instance
-                downloader = FoolTranscriptDownloader(
-                    data_dir=str(config.data_dir),
-                    verbose=options.get('verbose', False)
-                )
-
-                # Extract options
-                ticker = options.get('ticker')
-                all_transcripts = options.get('all', False)
-                from_date = options.get('from')
-                to_date = options.get('to')
-                delay = options.get('delay', 1.0)
-
-                # Execute download
-                if all_transcripts:
-                    logger.info("Downloading all historical transcripts")
-                    downloader.download_all_transcripts(delay=delay)
-                elif ticker:
-                    logger.info(f"Downloading transcripts for ticker: {ticker}")
-                    downloader.download_ticker(ticker, delay=delay)
-                elif from_date or to_date:
-                    logger.info(f"Downloading transcripts from {from_date} to {to_date}")
-                    downloader.download_date_range(
-                        from_date=from_date,
-                        to_date=to_date,
-                        delay=delay
-                    )
-                else:
-                    # Default: download current month
-                    logger.info("Downloading current month transcripts")
-                    downloader.download_current_month(delay=delay)
-
-                logger.info("Transcript download job completed successfully")
-
-            except Exception as e:
-                logger.error(f"Transcript download job failed: {e}", exc_info=True)
-                raise JobExecutionError(f"Transcript download failed: {e}") from e
-
-        return job
-
-    def _create_sec_job(self, options: Dict[str, Any]) -> Callable:
-        """Create SEC filing download job."""
-        def job():
-            logger.info("Starting SEC filing download job")
-            logger.debug(f"Options: {options}")
-
-            try:
-                from sec_edgar_downloader import SECEdgarDownloader
-                from config import get_config
-
-                config = self.config or get_config()
-
-                downloader = SECEdgarDownloader(
-                    data_dir=str(config.data_dir)
-                )
-
-                tickers = options.get('tickers', [])
-                forms = options.get('forms', ['10-K', '10-Q'])
-                from_date = options.get('from')
-                to_date = options.get('to')
-                all_filings = options.get('all', False)
-
-                if not tickers:
-                    logger.warning("No tickers specified for SEC download")
-                    return
-
-                for ticker in tickers:
-                    logger.info(f"Downloading SEC filings for {ticker}: {forms}")
-                    downloader.download(
-                        ticker=ticker,
-                        forms=forms,
-                        from_date=from_date,
-                        to_date=to_date,
-                        download_all=all_filings
-                    )
-
-                logger.info("SEC filing download job completed successfully")
-
-            except Exception as e:
-                logger.error(f"SEC filing download job failed: {e}", exc_info=True)
-                raise JobExecutionError(f"SEC download failed: {e}") from e
-
-        return job
-
-    def _create_index_job(self, options: Dict[str, Any]) -> Callable:
-        """Create indexing job."""
-        def job():
-            logger.info("Starting indexing job")
-            logger.debug(f"Options: {options}")
-
-            try:
-                from indexer import TranscriptIndexer
-                from config import get_config
-
-                config = self.config or get_config()
-
-                indexer = TranscriptIndexer(data_dir=str(config.data_dir))
-
-                # Run indexing
-                rebuild = options.get('rebuild', False)
-                if rebuild:
-                    logger.info("Rebuilding index from scratch")
-                    indexer.rebuild_index()
-                else:
-                    logger.info("Updating index")
-                    indexer.update_index()
-
-                logger.info("Indexing job completed successfully")
-
-            except Exception as e:
-                logger.error(f"Indexing job failed: {e}", exc_info=True)
-                raise JobExecutionError(f"Indexing failed: {e}") from e
-
-        return job
-
-    def _create_custom_job(self, options: Dict[str, Any]) -> Callable:
-        """Create custom script job."""
-        def job():
-            logger.info("Starting custom job")
-            logger.debug(f"Options: {options}")
-
-            try:
-                script_path = options.get('script')
-                if not script_path:
-                    raise ValueError("Custom job requires 'script' option")
-
-                script_path = Path(script_path).expanduser()
-                if not script_path.exists():
-                    raise FileNotFoundError(f"Script not found: {script_path}")
-
-                # Execute script
-                import subprocess
-                result = subprocess.run(
-                    [str(script_path)],
-                    capture_output=True,
+        try:
+            if stream_output:
+                # Stream output in real-time (for interactive/foreground use)
+                process = subprocess.Popen(
+                    command,
+                    shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
                     text=True,
-                    check=True
+                    cwd=working_dir,
+                    env=env
                 )
 
-                logger.info(f"Custom job output: {result.stdout}")
-                logger.info("Custom job completed successfully")
+                stdout_lines = []
+                try:
+                    for line in process.stdout:
+                        print(line, end='')  # Print in real-time
+                        stdout_lines.append(line)
+                except Exception:
+                    pass
 
-            except Exception as e:
-                logger.error(f"Custom job failed: {e}", exc_info=True)
-                raise JobExecutionError(f"Custom job failed: {e}") from e
+                process.wait(timeout=timeout)
+                stdout = ''.join(stdout_lines)
 
-        return job
+                if process.returncode != 0:
+                    raise JobExecutionError(
+                        f"Command failed with exit code {process.returncode}"
+                    )
+
+                return {
+                    'stdout': stdout,
+                    'stderr': '',
+                    'returncode': process.returncode
+                }
+            else:
+                # Stream output with logging (for scheduled jobs)
+                # This allows seeing output in real-time in logs
+                process = subprocess.Popen(
+                    command,
+                    shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    cwd=working_dir,
+                    env=env
+                )
+
+                stdout_lines = []
+                stderr_lines = []
+                
+                # Read stdout and stderr in real-time using threads
+                import threading
+                import queue
+                
+                def read_stream(stream, output_list, log_func, prefix=""):
+                    for line in stream:
+                        line = line.rstrip('\n')
+                        output_list.append(line)
+                        log_func(f"{log_prefix}{prefix}{line}")
+                
+                # Start threads to read both streams
+                stdout_thread = threading.Thread(
+                    target=read_stream,
+                    args=(process.stdout, stdout_lines, logger.info, "")
+                )
+                stderr_thread = threading.Thread(
+                    target=read_stream,
+                    args=(process.stderr, stderr_lines, logger.info, "")
+                )
+                
+                stdout_thread.start()
+                stderr_thread.start()
+                
+                # Wait for process with timeout
+                try:
+                    process.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    raise
+                
+                stdout_thread.join()
+                stderr_thread.join()
+                
+                stdout = '\n'.join(stdout_lines)
+                stderr = '\n'.join(stderr_lines)
+
+                if process.returncode != 0:
+                    raise JobExecutionError(
+                        f"Command failed with exit code {process.returncode}: {stderr}"
+                    )
+
+                return {
+                    'stdout': stdout,
+                    'stderr': stderr,
+                    'returncode': process.returncode
+                }
+
+        except subprocess.TimeoutExpired as e:
+            logger.error(f"Command timed out after {timeout}s: {command}")
+            raise JobExecutionError(f"Command timed out after {timeout}s") from e
+
+        except JobExecutionError:
+            raise
+
+        except Exception as e:
+            logger.error(f"Command execution failed: {e}")
+            raise JobExecutionError(f"Command execution failed: {e}") from e
 
     def execute_with_retry(
         self,
-        job_func: Callable,
+        command: str,
         job_name: str,
         max_retries: int = 3,
-        retry_delay_minutes: int = 15
+        retry_delay_minutes: int = 15,
+        timeout: Optional[int] = 3600
     ) -> Dict[str, Any]:
         """
-        Execute job with retry logic and statistics tracking.
+        Execute command with retry logic and statistics tracking.
 
         Args:
-            job_func: Job function to execute
+            command: Shell command to execute
             job_name: Name of the job for logging
             max_retries: Maximum number of retry attempts
             retry_delay_minutes: Delay between retries in minutes
+            timeout: Command timeout in seconds
 
         Returns:
             Dict with execution statistics
 
         Raises:
-            JobExecutionError: If job fails after all retries
+            JobExecutionError: If command fails after all retries
         """
+        import uuid
+        
+        # Generate unique run ID (short form for readability)
+        run_id = str(uuid.uuid4())[:8]
+        log_prefix = f"[{job_name}:{run_id}]"
+        
         start_time = datetime.now()
         attempt = 0
         last_error = None
+        
+        logger.info(f"{log_prefix} Starting job run")
 
         while attempt < max_retries:
             try:
-                logger.info(f"Executing job '{job_name}' (attempt {attempt + 1}/{max_retries})")
+                logger.info(f"{log_prefix} Attempt {attempt + 1}/{max_retries}")
 
-                # Execute job
-                job_func()
+                # Execute command with job context
+                result = self.execute_command(
+                    command, 
+                    timeout=timeout,
+                    job_name=job_name,
+                    run_id=run_id
+                )
 
                 # Success
                 duration = (datetime.now() - start_time).total_seconds()
                 stats = {
                     'job_name': job_name,
+                    'run_id': run_id,
+                    'command': command,
                     'status': 'success',
                     'duration_seconds': duration,
                     'attempts': attempt + 1,
+                    'returncode': result['returncode'],
                     'timestamp': datetime.now().isoformat()
                 }
 
                 self.job_stats[job_name] = stats
-                logger.info(f"Job '{job_name}' completed in {duration:.2f}s")
+                logger.info(f"{log_prefix} Completed successfully in {duration:.2f}s")
                 return stats
 
-            except Exception as e:
+            except JobExecutionError as e:
                 last_error = e
                 attempt += 1
 
                 if attempt < max_retries:
                     delay_seconds = retry_delay_minutes * 60
                     logger.warning(
-                        f"Job '{job_name}' failed (attempt {attempt}/{max_retries}): {e}"
+                        f"{log_prefix} Failed (attempt {attempt}/{max_retries}): {e}"
                     )
-                    logger.info(f"Retrying in {retry_delay_minutes} minutes...")
+                    logger.info(f"{log_prefix} Retrying in {retry_delay_minutes} minutes...")
                     time.sleep(delay_seconds)
                 else:
-                    logger.error(f"Job '{job_name}' failed after {max_retries} attempts")
+                    logger.error(f"{log_prefix} Failed after {max_retries} attempts")
 
         # All retries exhausted
         duration = (datetime.now() - start_time).total_seconds()
         stats = {
             'job_name': job_name,
+            'run_id': run_id,
+            'command': command,
             'status': 'failed',
             'duration_seconds': duration,
             'attempts': max_retries,
@@ -302,7 +271,7 @@ class JobManager:
 
         self.job_stats[job_name] = stats
         raise JobExecutionError(
-            f"Job '{job_name}' failed after {max_retries} attempts: {last_error}"
+            f"{log_prefix} Failed after {max_retries} attempts: {last_error}"
         ) from last_error
 
     def get_job_stats(self, job_name: str = None) -> Dict[str, Any]:
@@ -318,3 +287,35 @@ class JobManager:
         if job_name:
             return self.job_stats.get(job_name, {})
         return self.job_stats
+
+
+# Module-level function for APScheduler serialization
+def execute_scheduled_command(
+    command: str,
+    job_name: str,
+    max_retries: int = 3,
+    retry_delay_minutes: int = 15,
+    timeout: int = 3600
+) -> Dict[str, Any]:
+    """
+    Execute a scheduled command. This is a module-level function so APScheduler
+    can serialize it for persistent storage.
+
+    Args:
+        command: Shell command to execute
+        job_name: Name of the job for logging
+        max_retries: Maximum retry attempts
+        retry_delay_minutes: Delay between retries
+        timeout: Command timeout in seconds
+
+    Returns:
+        Execution statistics dictionary
+    """
+    executor = CommandExecutor()
+    return executor.execute_with_retry(
+        command=command,
+        job_name=job_name,
+        max_retries=max_retries,
+        retry_delay_minutes=retry_delay_minutes,
+        timeout=timeout
+    )
