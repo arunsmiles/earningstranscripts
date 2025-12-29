@@ -113,11 +113,11 @@ def cmd_start(args):
             logger.info("Use 'job-scheduler stop' to stop it")
             logger.info(f"Logs: {args.log_file}")
 
-            # Write PID file
-            pid_file = Path.home() / ".earnings_data" / "scheduler.pid"
+            # Write PID file - use the same path as the service
+            from scheduler.service import _get_pid_file_path
+            pid_file = _get_pid_file_path()
             pid_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(pid_file, 'w') as f:
-                f.write(str(os.getpid()))
+            pid_file.write_text(str(os.getpid()))
 
             # Keep running
             while service.is_running():
@@ -132,7 +132,8 @@ def cmd_stop(args):
     """Stop the scheduler."""
     setup_logging(verbose=args.verbose)
 
-    pid_file = Path.home() / ".earnings_data" / "scheduler.pid"
+    from scheduler.service import _get_pid_file_path
+    pid_file = _get_pid_file_path()
 
     if not pid_file.exists():
         logger.warning("Scheduler does not appear to be running (no PID file)")
