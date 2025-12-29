@@ -12,11 +12,12 @@ Features:
 - Concurrent job execution
 - One-time and recurring jobs
 - Job event logging
+- Run history tracking
 """
 
 from scheduler.service import SchedulerService
-from scheduler.jobs import CommandExecutor
+from scheduler.jobs import CommandExecutor, HistoryStore, get_history_store
 from scheduler.config import SchedulerConfig
 
-__version__ = "0.2.0"
-__all__ = ["SchedulerService", "CommandExecutor", "SchedulerConfig"]
+__version__ = "0.2.1"
+__all__ = ["SchedulerService", "CommandExecutor", "SchedulerConfig", "HistoryStore", "get_history_store"]

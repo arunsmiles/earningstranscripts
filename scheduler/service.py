@@ -39,6 +39,14 @@ from scheduler.jobs import CommandExecutor, execute_scheduled_command, JobExecut
 logger = logging.getLogger(__name__)
 
 
+def _get_data_dir() -> Path:
+    """Get the data directory for scheduler files."""
+    data_dir = os.environ.get('EARNINGS_DATA_DIR')
+    if data_dir:
+        return Path(data_dir).expanduser()
+    return Path.home() / ".earnings_data"
+
+
 def _get_pid_file_path() -> Path:
     """Get the path to the scheduler PID file."""
     # Check SCHEDULER_PID_FILE first
@@ -46,13 +54,12 @@ def _get_pid_file_path() -> Path:
     if pid_path:
         return Path(pid_path)
     
-    # Fall back to EARNINGS_DATA_DIR
-    data_dir = os.environ.get('EARNINGS_DATA_DIR')
-    if data_dir:
-        return Path(data_dir) / "scheduler.pid"
-    
-    # Final fallback
-    return Path.home() / ".earnings_data" / "scheduler.pid"
+    return _get_data_dir() / "scheduler.pid"
+
+
+def _get_info_file_path() -> Path:
+    """Get the path to the scheduler info file."""
+    return _get_data_dir() / "scheduler_info.json"
 
 
 def _is_process_running(pid: int) -> bool:
@@ -62,6 +69,38 @@ def _is_process_running(pid: int) -> bool:
         return True
     except OSError:
         return False
+
+
+def get_scheduler_info() -> Optional[Dict[str, Any]]:
+    """
+    Get information about the running scheduler.
+    
+    Returns:
+        Dict with scheduler info or None if not running/no info file.
+    """
+    import json
+    
+    running, pid = is_scheduler_running()
+    if not running:
+        return None
+    
+    info_file = _get_info_file_path()
+    if not info_file.exists():
+        # Return minimal info if no info file but scheduler is running
+        return {
+            'pid': pid,
+            'running': True,
+            'data_dir': str(_get_data_dir()),
+        }
+    
+    try:
+        with open(info_file, 'r') as f:
+            info = json.load(f)
+        info['running'] = True
+        info['pid'] = pid
+        return info
+    except (json.JSONDecodeError, OSError):
+        return {'pid': pid, 'running': True, 'data_dir': str(_get_data_dir())}
 
 
 def is_scheduler_running() -> tuple[bool, Optional[int]]:
@@ -514,22 +553,54 @@ class SchedulerService:
             logger.warning("Scheduler is already running")
 
     def _write_pid_file(self):
-        """Write the current process PID to the PID file."""
+        """Write the current process PID and scheduler info files."""
+        import json
+        
+        # Write PID file
         pid_file = _get_pid_file_path()
         pid_file.parent.mkdir(parents=True, exist_ok=True)
         pid_file.write_text(str(os.getpid()))
         logger.debug(f"Wrote PID file: {pid_file}")
         
+        # Write scheduler info file with runtime configuration
+        info_file = _get_info_file_path()
+        scheduler_info = {
+            'pid': os.getpid(),
+            'started_at': datetime.now().isoformat(),
+            'config_path': str(self.config.config_path) if self.config.config_path else None,
+            'job_store_path': self.job_store_path,
+            'data_dir': str(_get_data_dir()),
+            'log_dir': str(_get_data_dir() / "logs"),
+            'history_file': str(_get_data_dir() / "scheduler_history.json"),
+            'working_directory': os.getcwd(),
+        }
+        
+        try:
+            with open(info_file, 'w') as f:
+                json.dump(scheduler_info, f, indent=2)
+            logger.debug(f"Wrote scheduler info file: {info_file}")
+        except OSError as e:
+            logger.warning(f"Failed to write scheduler info file: {e}")
+        
         # Register cleanup on exit
         atexit.register(self._remove_pid_file)
     
     def _remove_pid_file(self):
-        """Remove the PID file."""
+        """Remove the PID and info files."""
         pid_file = _get_pid_file_path()
+        info_file = _get_info_file_path()
+        
         try:
             if pid_file.exists():
                 pid_file.unlink()
                 logger.debug(f"Removed PID file: {pid_file}")
+        except OSError:
+            pass
+        
+        try:
+            if info_file.exists():
+                info_file.unlink()
+                logger.debug(f"Removed scheduler info file: {info_file}")
         except OSError:
             pass
 

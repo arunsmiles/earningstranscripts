@@ -27,8 +27,9 @@ try:
 except ImportError:
     pass
 
-from scheduler.service import SchedulerService, is_scheduler_running
+from scheduler.service import SchedulerService, is_scheduler_running, get_scheduler_info
 from scheduler.config import SchedulerConfig, JobConfig, ScheduleConfig
+from scheduler.jobs import get_history_store, CommandExecutor, HistoryStore
 
 logger = logging.getLogger(__name__)
 
@@ -171,69 +172,162 @@ def cmd_status(args):
     setup_logging(verbose=args.verbose)
 
     try:
-        # Check if scheduler is running via PID file
+        # Get scheduler info (includes running status)
+        scheduler_info = get_scheduler_info()
         running, pid = is_scheduler_running()
         
-        print("\n=== Scheduler Status ===\n")
-        print(f"Running: {running}")
-        if running and pid:
-            print(f"PID: {pid}")
+        print("\n┌─────────────────────────────────────────────────────────────────┐")
+        print("│                      SCHEDULER STATUS                           │")
+        print("└─────────────────────────────────────────────────────────────────┘\n")
+        
+        if running:
+            print(f"  Status:     \033[92m● Running\033[0m")
+            print(f"  PID:        {pid}")
+            
+            if scheduler_info:
+                if scheduler_info.get('started_at'):
+                    print(f"  Started:    {scheduler_info.get('started_at', 'N/A')}")
+                if scheduler_info.get('config_path'):
+                    print(f"  Config:     {scheduler_info.get('config_path', 'N/A')}")
+                print(f"  Data Dir:   {scheduler_info.get('data_dir', 'N/A')}")
+                print(f"  Job Store:  {scheduler_info.get('job_store_path', 'N/A')}")
+                print(f"  Log Dir:    {scheduler_info.get('log_dir', 'N/A')}")
+        else:
+            print(f"  Status:     \033[91m○ Not Running\033[0m")
+            print("\n  Start the scheduler with: job-scheduler start --foreground")
+            return
 
-        # Load config to show jobs from persisted store
-        service = SchedulerService(config_path=args.config)
+        # Load jobs from persisted store (using scheduler's paths)
+        job_store_path = scheduler_info.get('job_store_path') if scheduler_info else None
+        service = SchedulerService(config_path=args.config, job_store_path=job_store_path)
         jobs = service.get_persisted_jobs()
-        print(f"Jobs in store: {len(jobs)}")
+        
+        print(f"\n  Active Jobs: {len(jobs)}")
 
         if jobs:
-            print("\nScheduled Jobs:")
+            print("\n  ┌" + "─" * 50 + "┐")
+            print("  │ Scheduled Jobs" + " " * 35 + "│")
+            print("  ├" + "─" * 50 + "┤")
             for job in jobs:
-                print(f"\n  {job['id']}")
-                print(f"    Next Run: {job['next_run']}")
-                print(f"    Trigger: {job['trigger']}")
+                job_id = job['id'][:30]
+                next_run = job['next_run'][:19] if job['next_run'] else 'N/A'
+                print(f"  │  {job_id:<28} Next: {next_run:<19} │")
+            print("  └" + "─" * 50 + "┘")
+        
+        print()
 
     except Exception as e:
         logger.error(f"Failed to get status: {e}")
+        if args.verbose:
+            import traceback
+            traceback.print_exc()
         sys.exit(1)
 
 
 def cmd_list(args):
-    """List all scheduled jobs."""
+    """List all scheduled jobs from the running scheduler."""
     setup_logging(verbose=args.verbose)
 
     try:
-        config = SchedulerConfig(args.config)
+        # Check if scheduler is running and get its info
+        scheduler_info = get_scheduler_info()
+        running, pid = is_scheduler_running()
+        
+        if not running:
+            print("\n\033[93mScheduler is not running.\033[0m")
+            print("Showing jobs from configuration file instead.\n")
+            # Fall back to config file
+            config = SchedulerConfig(args.config)
+            _print_config_jobs(config)
+            return
+        
+        # Use the running scheduler's job store
+        job_store_path = scheduler_info.get('job_store_path') if scheduler_info else None
+        config_path = scheduler_info.get('config_path') if scheduler_info else args.config
+        
+        service = SchedulerService(config_path=config_path, job_store_path=job_store_path)
+        jobs = service.get_persisted_jobs()
+        
+        print(f"\n┌─────────────────────────────────────────────────────────────────┐")
+        print(f"│                    ACTIVE SCHEDULED JOBS                        │")
+        print(f"└─────────────────────────────────────────────────────────────────┘")
+        print(f"\n  Scheduler PID: {pid}")
+        if scheduler_info and scheduler_info.get('config_path'):
+            print(f"  Config: {scheduler_info.get('config_path')}")
+        print(f"  Total Jobs: {len(jobs)}\n")
 
-        print(f"\n=== Configured Jobs ({len(config.jobs)}) ===\n")
-
-        for job in config.jobs:
-            status = "✓" if job.enabled else "✗"
-            print(f"{status} {job.name}")
-            print(f"    Command: {job.command}")
-            print(f"    Schedule: {job.schedule.type}", end="")
-
-            if job.schedule.type == 'daily':
-                print(f" at {job.schedule.time}")
-            elif job.schedule.type == 'weekly':
-                print(f" on {job.schedule.day} at {job.schedule.time}")
-            elif job.schedule.type == 'interval':
-                if job.schedule.hours:
-                    print(f" every {job.schedule.hours} hour(s)")
-                if job.schedule.minutes:
-                    print(f" every {job.schedule.minutes} minute(s)")
-            elif job.schedule.type == 'cron':
-                print(f": {job.schedule.cron}")
-            else:
-                print()
-
-            if job.description:
-                print(f"    Description: {job.description}")
-            if job.timeout != 3600:
-                print(f"    Timeout: {job.timeout}s")
+        if not jobs:
+            print("  No jobs are currently scheduled.")
+            print()
+            return
+        
+        # Also load config for job details (command, description)
+        config = None
+        if config_path:
+            try:
+                config = SchedulerConfig(config_path)
+            except:
+                pass
+        
+        for job in jobs:
+            job_id = job['id']
+            next_run = job['next_run']
+            trigger = job['trigger']
+            
+            # Try to get job details from config
+            job_config = None
+            if config:
+                for j in config.jobs:
+                    if j.name == job_id:
+                        job_config = j
+                        break
+            
+            print(f"  \033[1m{job_id}\033[0m")
+            print(f"    Next Run: {next_run}")
+            print(f"    Trigger:  {trigger}")
+            if job_config:
+                print(f"    Command:  {job_config.command}")
+                if job_config.description:
+                    print(f"    Description: {job_config.description}")
             print()
 
     except Exception as e:
         logger.error(f"Failed to list jobs: {e}")
+        if args.verbose:
+            import traceback
+            traceback.print_exc()
         sys.exit(1)
+
+
+def _print_config_jobs(config: SchedulerConfig):
+    """Helper to print jobs from a config file."""
+    print(f"=== Configured Jobs ({len(config.jobs)}) ===\n")
+
+    for job in config.jobs:
+        status = "✓" if job.enabled else "✗"
+        print(f"{status} {job.name}")
+        print(f"    Command: {job.command}")
+        print(f"    Schedule: {job.schedule.type}", end="")
+
+        if job.schedule.type == 'daily':
+            print(f" at {job.schedule.time}")
+        elif job.schedule.type == 'weekly':
+            print(f" on {job.schedule.day} at {job.schedule.time}")
+        elif job.schedule.type == 'interval':
+            if job.schedule.hours:
+                print(f" every {job.schedule.hours} hour(s)")
+            if job.schedule.minutes:
+                print(f" every {job.schedule.minutes} minute(s)")
+        elif job.schedule.type == 'cron':
+            print(f": {job.schedule.cron}")
+        else:
+            print()
+
+        if job.description:
+            print(f"    Description: {job.description}")
+        if job.timeout != 3600:
+            print(f"    Timeout: {job.timeout}s")
+        print()
 
 
 def cmd_add(args):
@@ -365,16 +459,33 @@ def cmd_run_once(args):
                 logger.info("Note: The scheduler service must be running for background jobs to execute.")
         else:
             # Run immediately in the foreground (default behavior)
-            from scheduler.jobs import CommandExecutor
-
+            import uuid
             job_id = f"onetime_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            run_id = str(uuid.uuid4())[:8]
             logger.info(f"Running job '{job_id}' now...")
             logger.info(f"Command: {args.command}")
             print()  # Blank line before command output
 
             executor = CommandExecutor()
+            history_store = get_history_store()
 
             start_time = datetime.now()
+            
+            # Record run start in history
+            history_record = {
+                'job_name': job_id,
+                'run_id': run_id,
+                'command': args.command,
+                'start_time': start_time.isoformat(),
+                'end_time': None,
+                'elapsed_seconds': None,
+                'status': 'running',
+                'exit_code': None,
+                'error': None,
+                'attempts': 1
+            }
+            history_store.add_run(history_record)
+            
             try:
                 result = executor.execute_command(
                     args.command,
@@ -385,10 +496,26 @@ def cmd_run_once(args):
                 duration = (end_time - start_time).total_seconds()
                 print()  # Blank line after command output
                 logger.info(f"Job '{job_id}' completed successfully in {duration:.1f}s")
+                
+                # Update history with success
+                history_store.update_run(run_id, {
+                    'end_time': end_time.isoformat(),
+                    'elapsed_seconds': round(duration, 2),
+                    'status': 'success',
+                    'exit_code': result.get('returncode', 0)
+                })
             except Exception as job_error:
                 end_time = datetime.now()
                 duration = (end_time - start_time).total_seconds()
                 logger.error(f"Job '{job_id}' failed after {duration:.1f}s: {job_error}")
+                
+                # Update history with failure
+                history_store.update_run(run_id, {
+                    'end_time': end_time.isoformat(),
+                    'elapsed_seconds': round(duration, 2),
+                    'status': 'failed',
+                    'error': str(job_error)
+                })
                 sys.exit(1)
 
     except Exception as e:
@@ -397,8 +524,14 @@ def cmd_run_once(args):
 
 
 def cmd_logs(args):
-    """View scheduler logs."""
-    log_file = get_log_file()
+    """View scheduler logs from the running scheduler."""
+    # Try to get log path from running scheduler
+    scheduler_info = get_scheduler_info()
+    
+    if scheduler_info and scheduler_info.get('log_dir'):
+        log_file = Path(scheduler_info['log_dir']) / "scheduler.log"
+    else:
+        log_file = get_log_file()
     
     if not log_file.exists():
         print(f"No log file found at: {log_file}")
@@ -450,6 +583,158 @@ def cmd_logs(args):
         
     except Exception as e:
         print(f"Error reading logs: {e}")
+        sys.exit(1)
+
+
+def cmd_history(args):
+    """Show job run history from the running scheduler."""
+    try:
+        # Try to get history file path from running scheduler
+        scheduler_info = get_scheduler_info()
+        
+        if scheduler_info and scheduler_info.get('history_file'):
+            history_file = Path(scheduler_info['history_file'])
+            history_store = HistoryStore(history_file=history_file)
+        else:
+            history_store = get_history_store()
+        
+        # Get history with filters
+        history = history_store.get_history(
+            job_name=args.job,
+            status=args.status,
+            limit=args.limit if not args.show_all else None
+        )
+        
+        if not history:
+            print("\nNo job run history found.")
+            if args.job:
+                print(f"  Filter: job = '{args.job}'")
+            if args.status:
+                print(f"  Filter: status = '{args.status}'")
+            return
+        
+        # Determine output format
+        if args.json:
+            print(json.dumps(history, indent=2))
+            return
+        
+        # Prepare table data
+        rows = []
+        for record in history:
+            job_name = record.get('job_name', 'unknown')
+            run_id = record.get('run_id', 'N/A')
+            
+            # Format start time
+            start_time_str = record.get('start_time', '')
+            if start_time_str:
+                try:
+                    start_dt = datetime.fromisoformat(start_time_str)
+                    start_time = start_dt.strftime('%Y-%m-%d %H:%M:%S')
+                except:
+                    start_time = start_time_str[:19]
+            else:
+                start_time = 'N/A'
+            
+            # Format end time
+            end_time_str = record.get('end_time', '')
+            if end_time_str:
+                try:
+                    end_dt = datetime.fromisoformat(end_time_str)
+                    end_time = end_dt.strftime('%Y-%m-%d %H:%M:%S')
+                except:
+                    end_time = end_time_str[:19]
+            else:
+                end_time = 'running...'
+            
+            # Format elapsed time
+            elapsed = record.get('elapsed_seconds')
+            if elapsed is not None:
+                if elapsed >= 3600:
+                    elapsed_str = f"{elapsed/3600:.1f}h"
+                elif elapsed >= 60:
+                    elapsed_str = f"{elapsed/60:.1f}m"
+                else:
+                    elapsed_str = f"{elapsed:.1f}s"
+            else:
+                elapsed_str = '-'
+            
+            status = record.get('status', 'unknown')
+            error = record.get('error', '') if args.verbose and status == 'failed' else None
+            
+            rows.append({
+                'job_name': job_name,
+                'run_id': run_id,
+                'start_time': start_time,
+                'end_time': end_time,
+                'elapsed': elapsed_str,
+                'status': status,
+                'error': error
+            })
+        
+        # Calculate column widths
+        headers = ['Job Name', 'Run ID', 'Start Time', 'End Time', 'Elapsed', 'Status']
+        col_widths = [
+            max(len(headers[0]), max(len(r['job_name']) for r in rows)),
+            max(len(headers[1]), max(len(r['run_id']) for r in rows)),
+            max(len(headers[2]), 19),  # datetime width
+            max(len(headers[3]), 19),
+            max(len(headers[4]), max(len(r['elapsed']) for r in rows)),
+            max(len(headers[5]), max(len(r['status']) for r in rows)),
+        ]
+        
+        # Build table
+        def make_row(cells, widths):
+            return "│ " + " │ ".join(cell.ljust(w) for cell, w in zip(cells, widths)) + " │"
+        
+        def make_separator(widths, left, mid, right, fill='─'):
+            return left + mid.join(fill * (w + 2) for w in widths) + right
+        
+        # Print table
+        print()
+        print(make_separator(col_widths, '┌', '┬', '┐'))
+        print(make_row(headers, col_widths))
+        print(make_separator(col_widths, '├', '┼', '┤'))
+        
+        for row in rows:
+            status = row['status']
+            if args.color:
+                if status == 'success':
+                    status_cell = f"\033[92m{status}\033[0m" + ' ' * (col_widths[5] - len(status))
+                elif status == 'failed':
+                    status_cell = f"\033[91m{status}\033[0m" + ' ' * (col_widths[5] - len(status))
+                elif status == 'running':
+                    status_cell = f"\033[93m{status}\033[0m" + ' ' * (col_widths[5] - len(status))
+                else:
+                    status_cell = status.ljust(col_widths[5])
+                
+                # Build row manually for colored status
+                cells = [
+                    row['job_name'].ljust(col_widths[0]),
+                    row['run_id'].ljust(col_widths[1]),
+                    row['start_time'].ljust(col_widths[2]),
+                    row['end_time'].ljust(col_widths[3]),
+                    row['elapsed'].ljust(col_widths[4]),
+                    status_cell
+                ]
+                print("│ " + " │ ".join(cells) + " │")
+            else:
+                cells = [row['job_name'], row['run_id'], row['start_time'], 
+                         row['end_time'], row['elapsed'], row['status']]
+                print(make_row(cells, col_widths))
+            
+            # Show error if verbose
+            if row['error']:
+                error_msg = row['error'][:80]
+                print(f"│   └─ Error: {error_msg}")
+        
+        print(make_separator(col_widths, '└', '┴', '┘'))
+        
+        print(f"\nShowing {len(history)} run(s)")
+        print(f"History file: {history_store.history_file}")
+        print(f"\nTo view logs for a specific run: job-scheduler logs --job <job_name>")
+        
+    except Exception as e:
+        print(f"Error reading history: {e}")
         sys.exit(1)
 
 
@@ -614,6 +899,24 @@ def main():
                              help='Show all logs (not just last N)')
     logs_parser.add_argument('--color', '-c', action='store_true', help='Colorize output')
     logs_parser.set_defaults(func=cmd_logs)
+
+    # History command
+    history_parser = subparsers.add_parser('history', help='View job run history')
+    history_parser.add_argument('--job', '-j', type=str, help='Filter by job name')
+    history_parser.add_argument('--status', '-s', type=str, 
+                                choices=['success', 'failed', 'running'],
+                                help='Filter by status')
+    history_parser.add_argument('--limit', '-n', type=int, default=20,
+                                help='Maximum number of entries to show (default: 20)')
+    history_parser.add_argument('--all', '-a', dest='show_all', action='store_true',
+                                help='Show all history entries')
+    history_parser.add_argument('--json', action='store_true',
+                                help='Output in JSON format')
+    history_parser.add_argument('--color', '-c', action='store_true',
+                                help='Colorize status output')
+    history_parser.add_argument('--verbose', '-v', action='store_true',
+                                help='Show additional details (error messages)')
+    history_parser.set_defaults(func=cmd_history)
 
     # Init command
     init_parser = subparsers.add_parser('init', help='Initialize scheduler configuration')
